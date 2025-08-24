@@ -3,12 +3,15 @@ from __future__ import annotations
 from typing import Optional, Tuple, List
 
 import numpy as np
-from PySide6.QtCore import Qt, QPointF, QRectF, QPoint
+from PySide6.QtCore import Qt, QPointF, QRectF, QPoint, Signal
 from PySide6.QtGui import QMouseEvent, QPainterPath, QPen, QPainter, QColor, QPixmap, QImage
 from PySide6.QtWidgets import QGraphicsPixmapItem, QGraphicsScene, QGraphicsView, QWidget, QVBoxLayout, QGraphicsPathItem
 
 
 class ImageView(QWidget):
+	colorPicked = Signal(QColor)  # Signal emitted when a color is picked with eyedropper
+	eyedropperCancelled = Signal()  # Signal emitted when eyedropper mode is cancelled
+	
 	def __init__(self, parent: Optional[QWidget] = None) -> None:
 		super().__init__(parent)
 		self._scene = QGraphicsScene(self)
@@ -23,7 +26,7 @@ class ImageView(QWidget):
 		self._orig_qimage: Optional[QImage] = None
 
 		# Interaction state
-		self._mode: str = "include"  # include|exclude|erase|crop
+		self._mode: str = "include"  # include|exclude|erase|crop|eyedropper
 		self._brush_size: int = 24
 		self._painting: bool = False
 		self._last_pos_scene: Optional[QPointF] = None
@@ -77,6 +80,10 @@ class ImageView(QWidget):
 	def set_mode(self, mode: str) -> None:
 		self._mode = mode
 		if mode == "crop":
+			self._view.setDragMode(QGraphicsView.NoDrag)
+			self._view.viewport().setCursor(Qt.CrossCursor)
+			self._view.setFocus()
+		elif mode == "eyedropper":
 			self._view.setDragMode(QGraphicsView.NoDrag)
 			self._view.viewport().setCursor(Qt.CrossCursor)
 			self._view.setFocus()
@@ -203,6 +210,9 @@ class ImageView(QWidget):
 			self._cropping_active = True
 			self._update_overlay()
 			return
+		elif self._mode == "eyedropper":
+			self._pick_color_at_position(scene_pos)
+			return
 		# painting
 		self._painting = True
 		self._last_pos_scene = scene_pos
@@ -236,7 +246,39 @@ class ImageView(QWidget):
 			self._crop_overlay_item.setVisible(False)
 			self._update_overlay()
 			return
+		# Allow ESC to cancel eyedropper mode
+		elif event.key() == Qt.Key_Escape and self._mode == "eyedropper":
+			self.set_mode("include")
+			self.eyedropperCancelled.emit()
+			return
 		super().keyPressEvent(event)
+
+	def _pick_color_at_position(self, scene_pos: QPointF) -> None:
+		"""Pick color from the image at the given scene position."""
+		# Determine which image to pick from based on current display
+		if self._preview_enabled and self._preview_pixmap is not None:
+			# Pick from the preview image
+			source_image = self._preview_pixmap.toImage()
+		else:
+			# Pick from the original image
+			source_image = self._orig_qimage
+		
+		if source_image is None:
+			return
+		
+		# Convert scene position to image coordinates
+		x = int(scene_pos.x())
+		y = int(scene_pos.y())
+		
+		# Check bounds
+		if x < 0 or y < 0 or x >= source_image.width() or y >= source_image.height():
+			return
+		
+		# Get the color at the pixel
+		color = source_image.pixelColor(x, y)
+		
+		# Emit the color picked signal
+		self.colorPicked.emit(color)
 
 	def _apply_brush(self, scene_pos: QPointF) -> None:
 		if self._user_mask is None:

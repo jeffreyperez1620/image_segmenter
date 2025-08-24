@@ -5,7 +5,7 @@ from typing import Optional
 
 import numpy as np
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QKeySequence, QPixmap, QImage
+from PySide6.QtGui import QAction, QKeySequence, QPixmap, QImage, QColor
 from PySide6.QtWidgets import (
 	QDockWidget,
 	QFileDialog,
@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 from app.ui.image_view import ImageView
 from app.ui.bg_tools_panel import BgToolsPanel
 from app.ui.color_simplify_panel import ColorSimplifyPanel
+from app.ui.custom_palette_panel import CustomPalettePanel
 from app.utils.qt_image import qimage_to_numpy_bgr, composite_foreground_over_transparent, numpy_rgba_to_qimage
 from app.processing.grabcut import apply_grabcut
 from app.processing.rembg_infer import rembg_remove_bgr_to_rgba
@@ -84,6 +85,10 @@ class MainWindow(QMainWindow):
 		self._color_panel = ColorSimplifyPanel(self)
 		self._tab_widget.addTab(self._color_panel, "2. Color Simplification")
 		
+		# Custom palette tab
+		self._custom_palette_panel = CustomPalettePanel(self)
+		self._tab_widget.addTab(self._custom_palette_panel, "3. Custom Palette")
+		
 		# Create dock widget for the tabbed interface
 		self._dock_tools = QDockWidget("Workflow Tools", self)
 		self._dock_tools.setObjectName("DockTools")
@@ -108,6 +113,17 @@ class MainWindow(QMainWindow):
 		self._color_panel.simplifyRequested.connect(self._on_simplify_colors)
 		self._color_panel.previewToggled.connect(self._image_view.set_preview_enabled)
 		self._color_panel.applyRequested.connect(self._on_apply_simplification)
+		
+		# Wire custom palette panel
+		self._custom_palette_panel.simplifyRequested.connect(self._on_simplify_custom_palette)
+		self._custom_palette_panel.previewToggled.connect(self._image_view.set_preview_enabled)
+		self._custom_palette_panel.applyRequested.connect(self._on_apply_simplification)
+		self._custom_palette_panel.eyedropperRequested.connect(self._on_start_eyedropper)
+		self._custom_palette_panel.eyedropperCancelled.connect(self._on_eyedropper_cancelled)
+		
+		# Wire image view color picking
+		self._image_view.colorPicked.connect(self._on_color_picked)
+		self._image_view.eyedropperCancelled.connect(self._on_eyedropper_cancelled)
 		
 		# Connect tab changes to update workflow guidance
 		self._tab_widget.currentChanged.connect(self._on_tab_changed)
@@ -470,6 +486,68 @@ class MainWindow(QMainWindow):
 		finally:
 			QApplication.restoreOverrideCursor()
 
+	def _on_simplify_custom_palette(self) -> None:
+		"""Handle custom palette simplification request."""
+		# Always use the original AI output as the base for simplification
+		if self._original_ai_output is not None:
+			source_rgba = self._original_ai_output.copy()
+		elif self._image_view._orig_qimage is not None:  # noqa: SLF001
+			# Fallback to original image if no AI output available
+			bgr = qimage_to_numpy_bgr(self._image_view._orig_qimage)  # noqa: SLF001
+			rgb = bgr[:, :, ::-1]
+			# Create RGBA with full alpha
+			source_rgba = np.dstack([rgb, np.full(rgb.shape[:2], 255, dtype=np.uint8)])
+		else:
+			QMessageBox.warning(self, "Custom Palette", "No image available for simplification.")
+			return
+		
+		if source_rgba is None:
+			return
+		
+		self.statusBar().showMessage("Simplifying colors with custom palette…")
+		QApplication.setOverrideCursor(Qt.WaitCursor)
+		
+		try:
+			# Get parameters from the custom palette panel
+			custom_palette = self._custom_palette_panel.get_palette()
+			distance_metric = self._custom_palette_panel.get_distance_metric()
+			preserve_alpha = self._custom_palette_panel.get_preserve_alpha()
+			
+			# Perform custom palette simplification
+			from app.processing.color_simplify import simplify_colors_custom_palette
+			simplified_rgba, palette = simplify_colors_custom_palette(
+				source_rgba, 
+				custom_palette, 
+				preserve_alpha,
+				distance_metric
+			)
+			
+			# Store the simplified output
+			self._simplified_output = simplified_rgba.copy()
+			
+			# Update statistics with palette information
+			stats = get_color_statistics(simplified_rgba)
+			stats['palette'] = palette
+			self._custom_palette_panel.update_statistics(stats)
+			
+			# Show preview
+			qimg = numpy_rgba_to_qimage(simplified_rgba)
+			self._image_view.set_preview_image(qimg)
+			self._image_view.set_preview_enabled(True)
+			
+			metric_name = {
+				"lab": "LAB (Perceptual)",
+				"rgb": "RGB (Euclidean)",
+				"hsv": "HSV"
+			}.get(distance_metric, distance_metric)
+			
+			self.statusBar().showMessage(f"Custom palette simplification complete using {metric_name}. Applied {len(palette)} colors.", 3000)
+			
+		except Exception as e:  # noqa: BLE001
+			QMessageBox.warning(self, "Custom Palette", f"Custom palette simplification failed: {e}")
+		finally:
+			QApplication.restoreOverrideCursor()
+
 
 
 	def _on_apply_simplification(self) -> None:
@@ -501,3 +579,32 @@ class MainWindow(QMainWindow):
 			self.statusBar().showMessage("Simplification applied to image. Workflow reset - start with background removal.", 5000)
 		else:
 			QMessageBox.warning(self, "Apply Simplification", "No original image available.")
+
+	def _on_start_eyedropper(self) -> None:
+		"""Start the eyedropper tool."""
+		if self._image_view._orig_qimage is None:  # noqa: SLF001
+			QMessageBox.warning(self, "Eyedropper", "No image loaded. Please load an image first.")
+			return
+		
+		# Set the image view to eyedropper mode
+		self._image_view.set_mode("eyedropper")
+		self.statusBar().showMessage("Eyedropper active - click on the image to pick a color", 3000)
+
+	def _on_color_picked(self, color: QColor) -> None:
+		"""Handle color picked from the image."""
+		# Add the color to the custom palette
+		self._custom_palette_panel.add_color_from_image(color)
+		
+		# Keep eyedropper mode active for multiple picks
+		# Don't switch back to normal mode
+		
+		# Show feedback
+		self.statusBar().showMessage(f"Color picked: RGB({color.red()}, {color.green()}, {color.blue()}) - Click to pick more colors or press ESC to exit", 3000)
+
+	def _on_eyedropper_cancelled(self) -> None:
+		"""Handle eyedropper mode cancellation."""
+		# Reset eyedropper button state
+		self._custom_palette_panel.reset_eyedropper_state()
+		# Switch back to normal mode
+		self._image_view.set_mode("include")
+		self.statusBar().showMessage("Eyedropper cancelled", 2000)
