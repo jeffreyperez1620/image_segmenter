@@ -10,7 +10,7 @@ def apply_grabcut(
 	bgr_image: np.ndarray,
 	rect_xywh: Optional[Tuple[int, int, int, int]] = None,
 	init_mask: Optional[np.ndarray] = None,
-	iterations: int = 5,
+	iterations: int = 10,
 ) -> np.ndarray:
 	"""
 	Run GrabCut on a BGR image.
@@ -40,6 +40,8 @@ def apply_grabcut(
 		if init_mask.shape != (h, w):
 			raise ValueError("init_mask shape must match image")
 		mask[:] = init_mask.astype(np.uint8)
+		# Ensure mask has valid values (0, 1, 2, 3)
+		mask = np.clip(mask, 0, 3).astype(np.uint8)
 
 	bgd_model = np.zeros((1, 65), np.float64)
 	fgd_model = np.zeros((1, 65), np.float64)

@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
 	QScrollArea, QFrame, QMessageBox, QColorDialog
 )
 
-from app.processing.color_simplify import create_palette_from_colors
+from processing.color_simplify import create_palette_from_colors
 
 
 class ColorSwatch(QLabel):
@@ -34,7 +34,9 @@ class ColorSwatch(QLabel):
 		"""Update the visual display of the color swatch."""
 		# Create a pixmap with the color
 		pixmap = QPixmap(self.size())
+		pixmap.fill(Qt.transparent)  # Start with transparent background
 		painter = QPainter(pixmap)
+		painter.setRenderHint(QPainter.Antialiasing)
 		
 		# Fill with the color
 		painter.fillRect(pixmap.rect(), self.color)
@@ -95,6 +97,24 @@ class CustomPalettePanel(QWidget):
 		)
 		instructions.setWordWrap(True)
 		layout.addWidget(instructions)
+		
+		# Color preview display
+		preview_layout = QHBoxLayout()
+		preview_layout.addWidget(QLabel("Preview:"))
+		
+		self.color_preview_swatch = ColorSwatch(QColor(255, 255, 255), -1)  # -1 indicates preview swatch
+		self.color_preview_swatch.setToolTip("Color under cursor (hover to preview)")
+		self.color_preview_swatch.setEnabled(False)  # Disable interaction for preview
+		# Ensure the preview swatch has a proper size
+		self.color_preview_swatch.setFixedSize(40, 40)
+		preview_layout.addWidget(self.color_preview_swatch)
+		
+		self.color_preview_label = QLabel("Move cursor over image to preview colors")
+		self.color_preview_label.setStyleSheet("color: gray; font-style: italic;")
+		preview_layout.addWidget(self.color_preview_label)
+		preview_layout.addStretch()
+		
+		layout.addLayout(preview_layout)
 		
 		# Controls
 		controls_layout = QHBoxLayout()
@@ -169,23 +189,6 @@ class CustomPalettePanel(QWidget):
 		action_layout.addWidget(self.btn_apply)
 		
 		layout.addLayout(action_layout)
-		
-		# Add some default colors
-		self._add_default_colors()
-	
-	def _add_default_colors(self) -> None:
-		"""Add some default colors to get started."""
-		default_colors = [
-			QColor(255, 0, 0),    # Red
-			QColor(0, 255, 0),    # Green
-			QColor(0, 0, 255),    # Blue
-			QColor(255, 255, 0),  # Yellow
-			QColor(255, 0, 255),  # Magenta
-			QColor(0, 255, 255),  # Cyan
-		]
-		
-		for color in default_colors:
-			self._add_color_to_list(color)
 	
 	def _add_color(self) -> None:
 		"""Add a new color to the palette."""
@@ -311,3 +314,32 @@ class CustomPalettePanel(QWidget):
 		self._eyedropper_active = False
 		self.btn_eyedropper.setText("Eyedropper")
 		self.btn_eyedropper.setStyleSheet("")
+	
+	def update_color_preview(self, color: QColor) -> None:
+		"""Update the color preview display with the given color."""
+		if self._eyedropper_active:
+			# Ensure the color is valid and properly set
+			if color.isValid():
+				# Debug: Print the color values to console
+				print(f"Preview color: R={color.red()}, G={color.green()}, B={color.blue()}")
+				
+				# Try a simpler approach - just update the existing swatch's color and force a repaint
+				self.color_preview_swatch.color = QColor(color.red(), color.green(), color.blue())
+				
+				# Force the swatch to update by calling update_display and then repaint
+				self.color_preview_swatch.update_display()
+				self.color_preview_swatch.update()
+				self.color_preview_swatch.repaint()
+				
+				# Also try setting the background color directly as a test
+				self.color_preview_swatch.setStyleSheet(f"background-color: rgb({color.red()}, {color.green()}, {color.blue()}); border: 2px solid black;")
+				
+				self.color_preview_label.setText(f"RGB({color.red()}, {color.green()}, {color.blue()})")
+				self.color_preview_label.setStyleSheet("color: white; font-weight: bold;")
+		else:
+			# Reset preview when eyedropper is not active
+			self.color_preview_swatch.color = QColor(255, 255, 255)
+			self.color_preview_swatch.update_display()
+			self.color_preview_swatch.setStyleSheet("background-color: white; border: 2px solid black;")
+			self.color_preview_label.setText("Move cursor over image to preview colors")
+			self.color_preview_label.setStyleSheet("color: gray; font-style: italic;")

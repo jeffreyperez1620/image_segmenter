@@ -38,11 +38,12 @@ def _resize_rgba(rgba: np.ndarray, target_hw: Tuple[int, int]) -> np.ndarray:
 	if rgba.shape[0] == th and rgba.shape[1] == tw:
 		return rgba
 	img = Image.fromarray(rgba, mode="RGBA")
-	img = img.resize((tw, th), resample=Image.BILINEAR)
+	# Use nearest neighbor interpolation to preserve sharp edges and avoid feathering
+	img = img.resize((tw, th), resample=Image.NEAREST)
 	return np.array(img, dtype=np.uint8)
 
 
-def rembg_remove_bgr_to_rgba(bgr: np.ndarray, model: Optional[str] = None, target_hw: Optional[Tuple[int, int]] = None) -> np.ndarray:
+def rembg_remove_bgr_to_rgba(bgr: np.ndarray, model: Optional[str] = None, target_hw: Optional[Tuple[int, int]] = None, sharp_edges: bool = True) -> np.ndarray:
 	if bgr.dtype != np.uint8 or bgr.ndim != 3 or bgr.shape[2] != 3:
 		raise ValueError("bgr must be HxWx3 uint8")
 	rgb = bgr[:, :, ::-1]
@@ -62,4 +63,34 @@ def rembg_remove_bgr_to_rgba(bgr: np.ndarray, model: Optional[str] = None, targe
 	# Normalize size to match input or provided target
 	if target_hw is None:
 		target_hw = (rgb.shape[0], rgb.shape[1])
-	return _resize_rgba(rgba, target_hw)
+	rgba = _resize_rgba(rgba, target_hw)
+	
+	# Convert smooth alpha to sharp binary alpha if requested
+	if sharp_edges:
+		rgba = _make_alpha_sharp(rgba)
+	
+	return rgba
+
+
+def _make_alpha_sharp(rgba: np.ndarray) -> np.ndarray:
+	"""
+	Convert smooth alpha channel to sharp binary alpha to eliminate feathering.
+	Uses Otsu's thresholding to find the optimal cutoff point.
+	"""
+	import cv2 as cv
+	
+	alpha = rgba[:, :, 3]
+	
+	# Use Otsu's method to find optimal threshold
+	_, binary_alpha = cv.threshold(alpha, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU)
+	
+	# Apply morphological operations to clean up the binary mask
+	kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, (3, 3))
+	binary_alpha = cv.morphologyEx(binary_alpha, cv.MORPH_CLOSE, kernel)
+	binary_alpha = cv.morphologyEx(binary_alpha, cv.MORPH_OPEN, kernel)
+	
+	# Create result with sharp alpha
+	result = rgba.copy()
+	result[:, :, 3] = binary_alpha
+	
+	return result

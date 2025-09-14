@@ -60,8 +60,9 @@ def simple_alpha_refine(
 	user_mask: Optional[np.ndarray],
 ) -> np.ndarray:
 	"""
-	Simple alpha refinement using morphological operations and smoothing.
+	Simple alpha refinement using morphological operations without blurring.
 	This is a fallback when the advanced matting fails.
+	Preserves sharp alpha edges to avoid feathering.
 	"""
 	import cv2 as cv
 	
@@ -73,15 +74,16 @@ def simple_alpha_refine(
 	binary_mask = cv.morphologyEx(binary_mask, cv.MORPH_CLOSE, kernel)
 	binary_mask = cv.morphologyEx(binary_mask, cv.MORPH_OPEN, kernel)
 	
-	# Apply Gaussian blur to create smooth alpha
-	alpha_smooth = cv.GaussianBlur(binary_mask.astype(np.float32), (5, 5), 1.0)
+	# Keep sharp alpha edges instead of blurring
+	# This prevents the 4-5 pixel feathering on edges
+	alpha_sharp = binary_mask.astype(np.uint8)
 	
 	# Apply user mask constraints
 	if user_mask is not None:
-		alpha_smooth[user_mask == 1] = 255.0
-		alpha_smooth[user_mask == 2] = 0.0
+		alpha_sharp[user_mask == 1] = 255
+		alpha_sharp[user_mask == 2] = 0
 	
-	return np.clip(alpha_smooth, 0, 255).astype(np.uint8)
+	return alpha_sharp
 
 
 def refine_alpha_portrait(

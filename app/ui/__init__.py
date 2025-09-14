@@ -1,5 +1,7 @@
 __all__ = [
 	"main_window",
 	"image_view",
-	"color_simplify_panel",
+	"color_processing_panel",
+	"region_cleanup_panel",
+	"progress_dialog"
 ]
