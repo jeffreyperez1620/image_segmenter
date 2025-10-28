@@ -536,7 +536,8 @@ def flood_fill_region(
     """
     # Ensure the input is contiguous and has the right dtype
     result = np.ascontiguousarray(rgba.copy(), dtype=np.uint8)
-    rgb = result[:, :, :3]
+    # Create a proper copy of the RGB data for OpenCV
+    rgb = result[:, :, :3].copy()
     alpha = result[:, :, 3]
     
     x, y = seed_point
@@ -566,6 +567,8 @@ def flood_fill_region(
             upDiff=(0, 0, 0),
             flags=cv.FLOODFILL_FIXED_RANGE
         )
+        # Copy the modified RGB data back to the result array
+        result[:, :, :3] = rgb
     except cv.error as e:
         # If OpenCV floodFill fails, try a manual flood fill implementation
         print(f"OpenCV floodFill failed: {e}, using manual implementation")

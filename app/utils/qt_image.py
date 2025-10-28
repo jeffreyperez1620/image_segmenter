@@ -22,6 +22,21 @@ def qimage_to_numpy_bgr(image: QImage) -> np.ndarray:
 	return bgr
 
 
+def qimage_to_numpy_rgba(image: QImage) -> np.ndarray:
+	"""Convert QImage to numpy RGBA array."""
+	# Ensure 4-channel RGBA for consistent memory layout
+	if image.format() != QImage.Format.Format_RGBA8888:
+		img = image.convertToFormat(QImage.Format.Format_RGBA8888)
+	else:
+		img = image
+
+	w = img.width()
+	h = img.height()
+	ptr = img.constBits()
+	arr = np.frombuffer(ptr, np.uint8).reshape((h, w, 4))
+	return arr.copy()
+
+
 def numpy_rgba_to_qimage(rgba: np.ndarray) -> QImage:
 	if rgba.dtype != np.uint8 or rgba.ndim != 3 or rgba.shape[2] != 4:
 		raise ValueError("rgba must be HxWx4 uint8")
@@ -30,6 +45,46 @@ def numpy_rgba_to_qimage(rgba: np.ndarray) -> QImage:
 	img = QImage(rgba.data, w, h, QImage.Format.Format_RGBA8888)
 	# Deep copy to detach from numpy buffer
 	return img.copy()
+
+
+def ensure_numpy_rgba(image) -> np.ndarray:
+	"""
+	Ensure the input is a numpy RGBA array.
+	
+	Args:
+		image: Either a numpy array (RGBA) or QImage
+		
+	Returns:
+		numpy.ndarray: RGBA array with shape (H, W, 4)
+	"""
+	if image is None:
+		raise ValueError("Image cannot be None")
+	
+	# Check if it's already a numpy array
+	if hasattr(image, 'dtype'):  # numpy array
+		return image
+	else:  # QImage - convert to numpy array
+		return qimage_to_numpy_rgba(image)
+
+
+def ensure_qimage(image) -> QImage:
+	"""
+	Ensure the input is a QImage.
+	
+	Args:
+		image: Either a numpy array (RGBA) or QImage
+		
+	Returns:
+		QImage: QImage object
+	"""
+	if image is None:
+		raise ValueError("Image cannot be None")
+	
+	# Check if it's already a QImage
+	if hasattr(image, 'dtype'):  # numpy array - convert to QImage
+		return numpy_rgba_to_qimage(image)
+	else:  # QImage - use directly
+		return image
 
 
 def composite_foreground_over_transparent(bgr: np.ndarray, mask01: np.ndarray) -> np.ndarray:

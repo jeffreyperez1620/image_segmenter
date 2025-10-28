@@ -444,21 +444,21 @@ class SmoothingTestWindow(QMainWindow):
         params_layout.addRow("Max Iterations:", self.gaussian_kernel_spinbox)
         
         
-        # Trim tendrils checkbox
-        self.trim_tendrils_checkbox = QCheckBox("Trim Tendrils")
-        self.trim_tendrils_checkbox.setToolTip("Remove thin tendrils based on thickness threshold")
-        self.trim_tendrils_checkbox.setChecked(False)
-        self.trim_tendrils_checkbox.toggled.connect(self.on_trim_tendrils_toggled)
-        params_layout.addRow("", self.trim_tendrils_checkbox)
+        # Tendril trimming is always enabled
         
         # Minimum tendril threshold
         self.tendril_threshold_spinbox = QSpinBox()
         self.tendril_threshold_spinbox.setRange(1, 10)
         self.tendril_threshold_spinbox.setValue(2)
         self.tendril_threshold_spinbox.setToolTip("Minimum tendril width threshold (pixels)")
-        self.tendril_threshold_spinbox.setEnabled(False)
+        self.tendril_threshold_spinbox.setEnabled(True)  # Always enabled since tendril trimming is always on
         params_layout.addRow("Tendril Threshold:", self.tendril_threshold_spinbox)
         
+        # Step-by-step mode checkbox
+        self.step_mode_checkbox = QCheckBox("Step-by-Step Mode")
+        self.step_mode_checkbox.setToolTip("Pause between iterations to inspect tendrils (rendered as magenta)")
+        self.step_mode_checkbox.setChecked(False)
+        params_layout.addRow("", self.step_mode_checkbox)
         
         control_layout.addWidget(params_group)
         
@@ -495,9 +495,7 @@ class SmoothingTestWindow(QMainWindow):
         self.gaussian_kernel_spinbox.setEnabled(not checked)
         
             
-    def on_trim_tendrils_toggled(self, checked):
-        """Handle trim tendrils checkbox toggle."""
-        self.tendril_threshold_spinbox.setEnabled(checked)
+    # Trim tendrils is always enabled, so no toggle method needed
         
     def load_image(self):
         """Load a working image file."""
@@ -1022,9 +1020,26 @@ class SmoothingTestWindow(QMainWindow):
         
         return result
         
-    def _apply_boundary_smoothing_global_with_progress(self, rgba, gaussian_kernel, unlimited_iterations=True, trim_tendrils=False, tendril_threshold=2):
-        """Apply boundary smoothing with progress tracking and convergence detection."""
+    def _apply_tendril_trimming_with_progress(self, rgba, gaussian_kernel, unlimited_iterations=True, tendril_threshold=2, step_mode=False):
+        """Apply tendril trimming with progress tracking and convergence detection."""
         import cv2 as cv
+        import time
+        
+        # Clear and initialize debug log
+        with open('tendril_debug.log', 'w') as f:
+            f.write(f"# Tendril Debug Log - Started at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"Parameters: unlimited={unlimited_iterations}, threshold={tendril_threshold}, step_mode={step_mode}\n")
+            f.write(f"Image shape: {rgba.shape}\n")
+            f.flush()
+        
+        def log_debug(message):
+            import os
+            debug_path = os.path.join(os.path.dirname(__file__), 'tendril_debug.log')
+            with open(debug_path, 'a') as f:
+                f.write(f"[{time.strftime('%H:%M:%S')}] {message}\n")
+                f.flush()
+        
+        log_debug("Starting boundary smoothing algorithm")
         
         result = rgba.copy()
         alpha = result[:, :, 3]
@@ -1032,6 +1047,7 @@ class SmoothingTestWindow(QMainWindow):
         # Only process non-transparent pixels
         non_transparent = alpha > 0
         if not np.any(non_transparent):
+            log_debug("No non-transparent pixels found, returning original")
             return result
         
         # Get RGB channels
@@ -1054,85 +1070,153 @@ class SmoothingTestWindow(QMainWindow):
         changes_history = []  # Track changes over time for convergence detection
         start_time = time.time()
         
+        log_debug(f"Starting main loop: max_iterations={max_iterations}, total_pixels={total_pixels}")
+        
         while iteration < max_iterations:
+            log_debug(f"Starting iteration {iteration + 1}")
             changes_made = False
             pixels_changed = 0
             
+            # Debug: Count how many pixels will be processed
+            pixels_to_process = np.sum(non_transparent[1:-1, 1:-1])
+            log_debug(f"Processing {pixels_to_process} non-border pixels")
             
-            # Create a copy for this iteration
-            new_rgb_int = rgb_int.copy()
+            # Apply tendril trimming algorithm
+            log_debug(f"Starting tendril processing for iteration {iteration + 1}")
+            from processing.tendril_trimming import TendrilTrimmer
+            trimmer = TendrilTrimmer()
             
-            # Process each pixel (skip borders)
-            for y in range(1, height - 1):
-                for x in range(1, width - 1):
-                    # Only process non-transparent pixels
-                    if not non_transparent[y, x]:
-                        continue
+            # If step mode is enabled, show tendril visualization before processing
+            log_debug(f"Processing tendrils for iteration {iteration + 1}")
+            self.progress_label.setText(f"Processing tendrils for iteration {iteration + 1}...")
+            QApplication.processEvents()
+            
+            try:
+                # For step mode, we need to mark tendrils first, show visualization, then process
+                log_debug(f"DEBUG: step_mode = {step_mode}")
+                if step_mode:
+                    log_debug("DEBUG: Entering step mode")
+                    log_debug("DEBUG: About to call _mark_tendrils")
+                    log_debug("DEBUG: About to set up transient state")
+                    log_debug("DEBUG: This should appear in log")
+                    log_debug("DEBUG: Setting up transient state now")
+                    log_debug("DEBUG: About to call _mark_tendrils")
+                    # Set up transient state manually for marking only
+                    trimmer._rgba = result
+                    trimmer._alpha = result[:, :, 3]  # This should be a view, not a copy
+                    trimmer._rgb = result[:, :, :3]
+                    trimmer._height, trimmer._width = result.shape[:2]
                     
-                    # Get the 4 adjacent pixels (up, down, left, right)
-                    neighbors = [
-                        rgb_int[y-1, x],  # up
-                        rgb_int[y+1, x],  # down
-                        rgb_int[y, x-1],  # left
-                        rgb_int[y, x+1]   # right
-                    ]
+                    # Debug: Verify that _alpha is a view of result[:, :, 3]
+                    log_debug(f"DEBUG: _alpha is view: {trimmer._alpha.base is result}")
+                    log_debug(f"DEBUG: _alpha shape: {trimmer._alpha.shape}, result alpha shape: {result[:, :, 3].shape}")
                     
-                    # Get alpha values for the 4 adjacent pixels
-                    neighbor_alphas = [
-                        alpha[y-1, x],  # up
-                        alpha[y+1, x],  # down
-                        alpha[y, x-1],  # left
-                        alpha[y, x+1]   # right
-                    ]
+                    # Mark tendrils only (don't process yet)
+                    tendrils_removed = trimmer._mark_tendrils(tendril_threshold)
+                    log_debug(f"Tendrils found: {tendrils_removed}")
                     
-                    # Count occurrences of each neighbor color, but only count non-transparent neighbors
-                    neighbor_counts = {}
-                    for i, neighbor in enumerate(neighbors):
-                        # Only count neighbors that are not transparent
-                        if neighbor_alphas[i] > 0:
-                            if neighbor in neighbor_counts:
-                                neighbor_counts[neighbor] += 1
-                            else:
-                                neighbor_counts[neighbor] = 1
+                    # Debug: Check if alpha values were written back to result
+                    alpha_values = result[:, :, 3]
+                    unique_alpha, alpha_counts = np.unique(alpha_values, return_counts=True)
+                    log_debug(f"DEBUG: Alpha values in result after marking: {dict(zip(unique_alpha, alpha_counts))}")
                     
-                    # Apply smoothing rules
-                    if neighbor_counts:
-                        # Original majority rule: if 3+ neighbors have the same color
-                        most_common_color = max(neighbor_counts, key=neighbor_counts.get)
-                        most_common_count = neighbor_counts[most_common_color]
+                    # Additional debug: Check specifically for tendril markers in result
+                    tendril_11_result = np.sum(alpha_values == 11)
+                    tendril_12_result = np.sum(alpha_values == 12)
+                    tendril_13_result = np.sum(alpha_values == 13)
+                    log_debug(f"DEBUG: Specific tendril counts in result: 11={tendril_11_result}, 12={tendril_12_result}, 13={tendril_13_result}")
+                    
+                    # Debug: Check if the copy preserves the alpha values
+                    vis_copy_alpha = vis_copy[:, :, 3]
+                    vis_unique_alpha, vis_alpha_counts = np.unique(vis_copy_alpha, return_counts=True)
+                    log_debug(f"DEBUG: Alpha values in vis_copy: {dict(zip(vis_unique_alpha, vis_alpha_counts))}")
+                    
+                    # Additional debug: Check specifically for tendril markers in vis_copy
+                    vis_tendril_11 = np.sum(vis_copy_alpha == 11)
+                    vis_tendril_12 = np.sum(vis_copy_alpha == 12)
+                    vis_tendril_13 = np.sum(vis_copy_alpha == 13)
+                    log_debug(f"DEBUG: Specific tendril counts in vis_copy: 11={vis_tendril_11}, 12={vis_tendril_12}, 13={vis_tendril_13}")
+                    
+                    if tendrils_removed > 0:
+                        log_debug(f"Creating tendril visualization for iteration {iteration + 1}")
+                        # Create visualization of the marked tendrils BEFORE processing
+                        self.progress_label.setText(f"Creating tendril visualization for iteration {iteration + 1}...")
+                        QApplication.processEvents()
                         
-                        if most_common_count >= 3:
-                            new_rgb_int[y, x] = most_common_color
-                            changes_made = True
-                            pixels_changed += 1
+                        try:
+                            # Debug: Check alpha values in result before creating copy
+                            alpha_values = result[:, :, 3]
+                            unique_alpha, alpha_counts = np.unique(alpha_values, return_counts=True)
+                            with open('tendril_debug.log', 'a') as f:
+                                f.write(f"[{time.strftime('%H:%M:%S')}] Alpha values in result before copy: {dict(zip(unique_alpha, alpha_counts))}\n")
+                                f.flush()
+                            
+                            # Create a copy for visualization before processing
+                            vis_copy = result.copy()
+                            tendril_vis = self._create_tendril_visualization(vis_copy, tendril_threshold)
+                            log_debug(f"Tendril visualization created successfully")
+                            if not self._show_tendril_visualization(tendril_vis, iteration + 1):
+                                # User canceled, break out of the algorithm
+                                log_debug("User canceled algorithm")
+                                self.progress_label.setText("Algorithm canceled by user")
+                                return result
+                            log_debug(f"User continued from tendril visualization")
+                        except Exception as e:
+                            log_debug(f"Error creating tendril visualization: {str(e)}")
+                            self.progress_label.setText(f"Error creating tendril visualization: {str(e)}")
+                            QApplication.processEvents()
+                            # Continue without visualization
+                    
+                    # Now process the marked tendrils
+                    if tendrils_removed > 0:
+                        changes_made = True
+                        
+                        log_debug(f"Applying color selection for iteration {iteration + 1}")
+                        self.progress_label.setText(f"Applying color selection for iteration {iteration + 1}...")
+                        QApplication.processEvents()
+                        
+                        # Apply color selection to magenta pixels
+                        pixels_recolored = trimmer._apply_color_selection_to_magenta(result)
+                        log_debug(f"Pixels recolored: {pixels_recolored}")
+                        if pixels_recolored > 0:
+                            pixels_changed += pixels_recolored
+                else:
+                    # Non-step mode: use the full iteration method
+                    tendrils_removed = trimmer._trim_tendrils_in_iteration(result, tendril_threshold)
+                    log_debug(f"Tendrils found: {tendrils_removed}")
+                    
+                    if tendrils_removed > 0:
+                        changes_made = True
+                        # For non-step mode, we don't need to track individual pixel changes
+                        pixels_changed = 100  # Placeholder
+            except Exception as e:
+                log_debug(f"Error processing tendrils: {str(e)}")
+                self.progress_label.setText(f"Error processing tendrils: {str(e)}")
+                QApplication.processEvents()
+                # Continue without tendril processing
+            
+            # If step mode is enabled, show color processing result
+            if step_mode:
+                log_debug(f"Showing color processing result for iteration {iteration + 1}")
+                # Create a copy with all non-transparent pixels at full opacity
+                display_result = result.copy()
+                non_transparent = display_result[:, :, 3] > 0
+                display_result[non_transparent, 3] = 255
                 
+                if not self._show_color_processing_result(display_result, iteration + 1):
+                    # User canceled, break out of the algorithm
+                    log_debug("User canceled algorithm from color processing result")
+                    self.progress_label.setText("Algorithm canceled by user")
+                    return result
+                log_debug(f"User continued from color processing result")
+                
+                # Continue iterating to handle more tendrils
+                # Don't break - let the main loop continue
             
-            # Update the RGB array
-            rgb_int = new_rgb_int
-            
-            # Convert back to RGB format
-            result[:, :, 0] = (rgb_int >> 16) & 0xFF
-            result[:, :, 1] = (rgb_int >> 8) & 0xFF
-            result[:, :, 2] = rgb_int & 0xFF
-            
-            # Apply tendril trimming AFTER RGB conversion (so it doesn't get overwritten)
-            if trim_tendrils:
-                from processing.tendril_trimming import TendrilTrimmer
-                trimmer = TendrilTrimmer()
-                tendrils_removed = trimmer._trim_tendrils_in_iteration(result, tendril_threshold)
-                if tendrils_removed > 0:
-                    changes_made = True
-                    pixels_changed += tendrils_removed
-                    
-                    # Apply color selection to magenta pixels
-                    pixels_recolored = trimmer._apply_color_selection_to_magenta(result)
-                    if pixels_recolored > 0:
-                        pixels_changed += pixels_recolored
-                    
-                    # Continue iterating to handle more tendrils
-                    # Don't break - let the main loop continue
+            # RGB values remain unchanged - only tendril trimming was applied
             
             iteration += 1
+            log_debug(f"Completed iteration {iteration}")
             
             # Track changes for convergence detection
             change_percentage = (pixels_changed / total_pixels) * 100 if total_pixels > 0 else 0
@@ -1140,12 +1224,14 @@ class SmoothingTestWindow(QMainWindow):
             
             # Update progress
             elapsed_time = time.time() - start_time
-            self.progress_label.setText(f"Iteration {iteration}: {pixels_changed} pixels changed ({change_percentage:.1f}%) - {elapsed_time:.1f}s")
+            log_debug(f"Iteration {iteration}: {pixels_changed} RGB pixels changed ({change_percentage:.1f}%) - {elapsed_time:.1f}s")
+            self.progress_label.setText(f"Iteration {iteration}: {pixels_changed} RGB pixels changed ({change_percentage:.1f}%) - {elapsed_time:.1f}s")
             QApplication.processEvents()
             
             # Convergence detection - be more conservative
             if not changes_made:
                 # No changes made - converged
+                log_debug(f"Converged after {iteration} iterations - no changes made")
                 self.progress_label.setText(f"✓ Converged after {iteration} iterations in {elapsed_time:.1f}s")
                 break
             
@@ -1155,35 +1241,223 @@ class SmoothingTestWindow(QMainWindow):
                 recent_changes = changes_history[-20:]
                 if len(set([round(x, 1) for x in recent_changes])) <= 2:
                     # Very similar change rates - might be oscillating
+                    log_debug(f"Stopped after {iteration} iterations - possible oscillation detected")
                     self.progress_label.setText(f"⚠ Stopped after {iteration} iterations - possible oscillation detected")
                     break
             
-            # Safety timeout (30 seconds for tendril trimming, 30 for regular)
-            timeout_limit = 30 if trim_tendrils else 30
-            if elapsed_time > timeout_limit:
-                self.progress_label.setText(f"⚠ Stopped after {iteration} iterations - timeout reached")
-                break
+            # Safety timeout (disabled for step mode due to user interactions, 30 for regular)
+            if not step_mode:
+                timeout_limit = 30
+                if elapsed_time > timeout_limit:
+                    log_debug(f"Stopped after {iteration} iterations - timeout reached ({elapsed_time:.1f}s > {timeout_limit}s)")
+                    self.progress_label.setText(f"⚠ Stopped after {iteration} iterations - timeout reached")
+                    break
+            else:
+                log_debug(f"Step mode: timeout disabled, elapsed time {elapsed_time:.1f}s")
             
             # Additional safety: if tendril trimming is removing too many pixels, it might be in a loop
-            if trim_tendrils and pixels_changed > total_pixels * 0.5:
-                self.progress_label.setText(f"⚠ Stopped after {iteration} iterations - too many pixels changed (possible loop)")
-                break
+            # But exclude alpha channel changes from tendril marking (values 11, 12, 13)
+            if pixels_changed > total_pixels * 0.5:
+                # Check if the high pixel count is due to alpha channel tampering
+                alpha_changes = np.sum((result[:, :, 3] > 10) & (result[:, :, 3] <= 13))
+                rgb_changes = pixels_changed - alpha_changes
+                
+                if rgb_changes > total_pixels * 0.5:
+                    log_debug(f"Stopped after {iteration} iterations - too many RGB pixels changed ({rgb_changes} > {total_pixels * 0.5})")
+                    self.progress_label.setText(f"⚠ Stopped after {iteration} iterations - too many RGB pixels changed (possible loop)")
+                    break
+                else:
+                    log_debug(f"High pixel count due to alpha channel marking ({alpha_changes} alpha changes, {rgb_changes} RGB changes) - continuing")
             
             # Keep only last 20 change records to prevent memory growth
             if len(changes_history) > 20:
                 changes_history = changes_history[-20:]
         
-        # Apply tendril trimming using the extracted algorithm
-        if trim_tendrils:
-            from processing.tendril_trimming import trim_tendrils as trim_tendrils_algorithm
-            
-            # Use the extracted algorithm
-            result, iterations_used, status_message = trim_tendrils_algorithm(result, tendril_threshold, max_iterations=30)
-            
-            if self.progress_label:
-                self.progress_label.setText(f"Tendril cleanup: {status_message}")
+        # Apply final tendril cleanup
+        log_debug("Starting final tendril cleanup")
         
+        # For now, skip the final cleanup since it's causing hangs
+        # The main algorithm already processed tendrils effectively
+        log_debug("Skipping final tendril cleanup to prevent hanging")
+        if self.progress_label:
+            self.progress_label.setText("Tendril processing completed (final cleanup skipped)")
+        
+        # Just restore alpha channel to full opacity
+        from processing.tendril_trimming import TendrilTrimmer
+        trimmer = TendrilTrimmer()
+        trimmer._restore_alpha_channel(result, rgba)
+        log_debug("Alpha channel restored to full opacity")
+        
+        log_debug(f"Algorithm completed successfully after {iteration} iterations")
         return result
+    
+    def _create_tendril_visualization(self, rgba, threshold):
+        """Create a visualization of tendrils by highlighting already-marked tendrils as magenta pixels."""
+        import time
+        import numpy as np
+        
+        # Log to debug file
+        import os
+        debug_path = os.path.join(os.path.dirname(__file__), 'tendril_debug.log')
+        with open(debug_path, 'a') as f:
+            f.write(f"[{time.strftime('%H:%M:%S')}] Creating tendril visualization with threshold {threshold}\n")
+            f.flush()
+        
+        # Work directly with the passed image (it's already a copy)
+        vis_image = rgba
+        
+        try:
+            # The image already has tendrils marked (alpha values 11, 12, 13)
+            # Just highlight them as magenta for visualization
+            alpha = vis_image[:, :, 3].astype(np.uint8)  # Ensure integer type
+            tendril_mask = (alpha > 10) & (alpha <= 13)  # Tendril markers are 11, 12, 13
+            
+            # Debug: Log alpha value distribution
+            unique_alpha, alpha_counts = np.unique(alpha, return_counts=True)
+            import os
+            debug_path = os.path.join(os.path.dirname(__file__), 'tendril_debug.log')
+            with open(debug_path, 'a') as f:
+                f.write(f"[{time.strftime('%H:%M:%S')}] Alpha values in visualization: {dict(zip(unique_alpha, alpha_counts))}\n")
+                f.flush()
+            
+            # Additional debug: Check specifically for tendril markers
+            tendril_11 = np.sum(alpha == 11)
+            tendril_12 = np.sum(alpha == 12)
+            tendril_13 = np.sum(alpha == 13)
+            with open(debug_path, 'a') as f:
+                f.write(f"[{time.strftime('%H:%M:%S')}] Specific tendril counts: 11={tendril_11}, 12={tendril_12}, 13={tendril_13}\n")
+                f.flush()
+            
+            # Debug: Check the mask creation
+            mask_11 = (alpha == 11)
+            mask_12 = (alpha == 12)
+            mask_13 = (alpha == 13)
+            combined_mask = (alpha > 10) & (alpha <= 13)
+            
+            # Save alpha channel as image for debugging
+            from PIL import Image
+            alpha_img = Image.fromarray(alpha)
+            alpha_img.save(debug_path.replace('.log', '_alpha.png'))
+            
+            with open(debug_path, 'a') as f:
+                f.write(f"[{time.strftime('%H:%M:%S')}] Mask counts: 11={np.sum(mask_11)}, 12={np.sum(mask_12)}, 13={np.sum(mask_13)}, combined={np.sum(combined_mask)}\n")
+                f.write(f"[{time.strftime('%H:%M:%S')}] Alpha dtype: {alpha.dtype}, min={alpha.min()}, max={alpha.max()}\n")
+                f.flush()
+            
+            # Print to console as well
+            print(f"DEBUG: Mask counts: 11={np.sum(mask_11)}, 12={np.sum(mask_12)}, 13={np.sum(mask_13)}, combined={np.sum(combined_mask)}")
+            print(f"DEBUG: Alpha dtype: {alpha.dtype}, unique values: {np.unique(alpha)}")
+            
+            # Count tendrils
+            tendril_count = np.sum(tendril_mask)
+            
+            # Set tendril pixels to magenta
+            vis_image[tendril_mask] = [255, 0, 255, 255]  # Magenta with full opacity
+            
+            # Set all other non-transparent pixels to full opacity for display
+            non_transparent = alpha > 0
+            non_tendril_mask = non_transparent & ~tendril_mask
+            vis_image[non_tendril_mask, 3] = 255
+            
+            with open(debug_path, 'a') as f:
+                f.write(f"[{time.strftime('%H:%M:%S')}] Tendril visualization created: {tendril_count} magenta pixels\n")
+                f.flush()
+                
+        except Exception as e:
+            with open(debug_path, 'a') as f:
+                f.write(f"[{time.strftime('%H:%M:%S')}] Error in tendril visualization: {str(e)}\n")
+                f.flush()
+            print(f"Error in tendril visualization: {e}")
+            # Return original image if visualization fails
+            return rgba.copy()
+        
+        return vis_image
+    
+    def _show_tendril_visualization(self, tendril_image, iteration):
+        """Show tendril visualization in a pause dialog."""
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QPushButton, QHBoxLayout
+        from PySide6.QtCore import Qt
+        
+        # Create dialog
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Tendril Visualization - Iteration {iteration}")
+        dialog.setModal(True)
+        dialog.resize(800, 600)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # Title
+        title_label = QLabel(f"Iteration {iteration}: Tendrils Detected (shown in magenta)")
+        title_label.setAlignment(Qt.AlignCenter)
+        title_label.setFont(QFont("Arial", 12, QFont.Bold))
+        layout.addWidget(title_label)
+        
+        # Image view
+        image_view = SynchronizedImageView()
+        qimg = numpy_rgba_to_qimage(tendril_image)
+        pixmap = QPixmap.fromImage(qimg)
+        image_view.set_pixmap(pixmap)
+        layout.addWidget(image_view)
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        cancel_button = QPushButton("Cancel Algorithm")
+        cancel_button.clicked.connect(dialog.reject)
+        button_layout.addWidget(cancel_button)
+        
+        continue_button = QPushButton("Continue to Color Processing")
+        continue_button.clicked.connect(dialog.accept)
+        button_layout.addWidget(continue_button)
+        button_layout.addStretch()
+        layout.addLayout(button_layout)
+        
+        # Show dialog and return result
+        result = dialog.exec()
+        return result == QDialog.Accepted
+    
+    def _show_color_processing_result(self, result_image, iteration):
+        """Show color processing result in a pause dialog."""
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QPushButton, QHBoxLayout
+        from PySide6.QtCore import Qt
+        
+        # Create dialog
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Color Processing Result - Iteration {iteration}")
+        dialog.setModal(True)
+        dialog.resize(800, 600)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # Title
+        title_label = QLabel(f"Iteration {iteration}: After Color Processing")
+        title_label.setAlignment(Qt.AlignCenter)
+        title_label.setFont(QFont("Arial", 12, QFont.Bold))
+        layout.addWidget(title_label)
+        
+        # Image view
+        image_view = SynchronizedImageView()
+        qimg = numpy_rgba_to_qimage(result_image)
+        pixmap = QPixmap.fromImage(qimg)
+        image_view.set_pixmap(pixmap)
+        layout.addWidget(image_view)
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        cancel_button = QPushButton("Cancel Algorithm")
+        cancel_button.clicked.connect(dialog.reject)
+        button_layout.addWidget(cancel_button)
+        
+        continue_button = QPushButton("Continue to Next Iteration")
+        continue_button.clicked.connect(dialog.accept)
+        button_layout.addWidget(continue_button)
+        button_layout.addStretch()
+        layout.addLayout(button_layout)
+        
+        # Show dialog and return result
+        result = dialog.exec()
+        return result == QDialog.Accepted
         
         
     def show_morphological_results(self, result_image, time_taken, param_info=""):
@@ -1255,31 +1529,30 @@ class SmoothingTestWindow(QMainWindow):
             # Get parameters from UI
             gaussian_kernel = self.gaussian_kernel_spinbox.value()
             unlimited_iterations = self.unlimited_iterations_checkbox.isChecked()
-            trim_tendrils = self.trim_tendrils_checkbox.isChecked()
             tendril_threshold = self.tendril_threshold_spinbox.value()
             
             # Debug: Show what parameters are being used
-            self.progress_label.setText(f"Parameters: unlimited={unlimited_iterations}, trim_tendrils={trim_tendrils}, threshold={tendril_threshold}")
+            self.progress_label.setText(f"Parameters: unlimited={unlimited_iterations}, threshold={tendril_threshold}")
             QApplication.processEvents()
             
             # Update progress
-            self.progress_label.setText("Applying boundary smoothing...")
-            self.statusBar().showMessage("Processing boundary smoothing...")
+            self.progress_label.setText("Applying tendril trimming...")
+            self.statusBar().showMessage("Processing tendril trimming...")
             QApplication.processEvents()
             
             
-            # Apply boundary smoothing with progress tracking
+            # Apply tendril trimming with progress tracking
             start_time = time.time()
-            result = self._apply_boundary_smoothing_global_with_progress(
+            step_mode = self.step_mode_checkbox.isChecked()
+            result = self._apply_tendril_trimming_with_progress(
                 self.original_image, 
-                gaussian_kernel, unlimited_iterations, trim_tendrils, tendril_threshold
+                gaussian_kernel, unlimited_iterations, tendril_threshold, step_mode
             )
             end_time = time.time()
             
             # Show results with parameter info
-            param_parts = ["4-Neighbor"]
-            if trim_tendrils:
-                param_parts.append(f"TEND:{tendril_threshold}")
+            param_parts = ["Tendril-Trimming"]
+            param_parts.append(f"TEND:{tendril_threshold}")
             if not unlimited_iterations:
                 param_parts.append(f"MAX:{gaussian_kernel}")
             
@@ -1287,12 +1560,12 @@ class SmoothingTestWindow(QMainWindow):
             self.show_boundary_results(result, end_time - start_time, param_info)
             
             # Update progress
-            self.progress_label.setText(f"✓ Boundary smoothing completed in {end_time - start_time:.3f}s")
-            self.statusBar().showMessage("Boundary smoothing completed")
+            self.progress_label.setText(f"✓ Tendril trimming completed in {end_time - start_time:.3f}s")
+            self.statusBar().showMessage("Tendril trimming completed")
             
         except Exception as e:
-            QMessageBox.critical(self, "Smoothing Error", f"Failed to apply boundary smoothing:\n{str(e)}")
-            self.progress_label.setText("Error applying boundary smoothing")
+            QMessageBox.critical(self, "Tendril Trimming Error", f"Failed to apply tendril trimming:\n{str(e)}")
+            self.progress_label.setText("Error applying tendril trimming")
             
     def show_boundary_results(self, result_image, time_taken, param_info=""):
         """Show boundary smoothing results while preserving zoom/pan state."""

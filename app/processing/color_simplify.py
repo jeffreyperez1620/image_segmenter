@@ -12,7 +12,6 @@ import cv2 as cv
 def simplify_colors_kmeans(
 	rgba: np.ndarray,
 	num_colors: int = 8,
-	preserve_alpha: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray]:
 	"""
 	Simplify colors using K-means clustering.
@@ -23,8 +22,6 @@ def simplify_colors_kmeans(
 		Input RGBA image, shape (H, W, 4)
 	num_colors: int
 		Number of colors to reduce to
-	preserve_alpha: bool
-		Whether to preserve alpha channel or simplify it too
 		
 	Returns
 	-------
@@ -86,15 +83,27 @@ def simplify_colors_kmeans(
 	# Map pixels to cluster centers
 	quantized_rgb = np.zeros_like(rgb)
 	
-	# Map non-transparent pixels
-	quantized_rgb[non_transparent][np.where(non_black_mask)[0]] = centers[labels]
+	# Create a mapping for all non-transparent pixels
+	non_transparent_indices = np.where(non_transparent)
+	non_transparent_flat = rgb[non_transparent]
 	
-	# Handle alpha channel
-	if preserve_alpha:
-		quantized_alpha = alpha
-	else:
-		# Simplify alpha to binary (transparent/opaque)
-		quantized_alpha = (alpha > 128).astype(np.uint8) * 255
+	# For pixels that were used in clustering, map them directly
+	filtered_indices = np.where(non_black_mask)[0]
+	quantized_rgb[non_transparent_indices[0][filtered_indices], 
+	              non_transparent_indices[1][filtered_indices]] = centers[labels]
+	
+	# For pixels that were filtered out (too dark), find their nearest cluster
+	black_pixel_indices = np.where(~non_black_mask)[0]
+	if len(black_pixel_indices) > 0:
+		black_pixels_rgb = non_transparent_flat[black_pixel_indices]
+		# Find nearest cluster for black pixels
+		from sklearn.metrics import pairwise_distances_argmin_min
+		nearest_clusters, _ = pairwise_distances_argmin_min(black_pixels_rgb, centers)
+		quantized_rgb[non_transparent_indices[0][black_pixel_indices], 
+		              non_transparent_indices[1][black_pixel_indices]] = centers[nearest_clusters]
+	
+	# Simplify alpha to binary (transparent/opaque)
+	quantized_alpha = (alpha > 128).astype(np.uint8) * 255
 	
 	# Combine back to RGBA
 	simplified_rgba = np.dstack([quantized_rgb, quantized_alpha])
@@ -105,7 +114,6 @@ def simplify_colors_kmeans(
 def simplify_colors_median_cut(
 	rgba: np.ndarray,
 	num_colors: int = 8,
-	preserve_alpha: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray]:
 	"""
 	Simplify colors using median cut algorithm.
@@ -115,10 +123,8 @@ def simplify_colors_median_cut(
 	rgba: np.ndarray
 		Input RGBA image, shape (H, W, 4)
 	num_colors: int
-		Number of colors to reduce to (must be power of 2)
-	preserve_alpha: bool
-		Whether to preserve alpha channel or simplify it too
-		
+			Number of colors to reduce to (must be power of 2)
+
 	Returns
 	-------
 	Tuple[np.ndarray, np.ndarray]
@@ -151,12 +157,8 @@ def simplify_colors_median_cut(
 	# Convert back to numpy array
 	quantized_rgb = np.array(palette_image.convert('RGB'))
 	
-	# Handle alpha channel
-	if preserve_alpha:
-		quantized_alpha = alpha
-	else:
-		# Simplify alpha to binary (transparent/opaque)
-		quantized_alpha = (alpha > 128).astype(np.uint8) * 255
+	# Simplify alpha to binary (transparent/opaque)
+	quantized_alpha = (alpha > 128).astype(np.uint8) * 255
 	
 	# Combine back to RGBA
 	simplified_rgba = np.dstack([quantized_rgb, quantized_alpha])
@@ -167,7 +169,6 @@ def simplify_colors_median_cut(
 def simplify_colors_octree(
 	rgba: np.ndarray,
 	num_colors: int = 8,
-	preserve_alpha: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray]:
 	"""
 	Simplify colors using octree quantization.
@@ -178,8 +179,6 @@ def simplify_colors_octree(
 		Input RGBA image, shape (H, W, 4)
 	num_colors: int
 		Number of colors to reduce to
-	preserve_alpha: bool
-		Whether to preserve alpha channel or simplify it too
 		
 	Returns
 	-------
@@ -207,12 +206,8 @@ def simplify_colors_octree(
 	# Convert back to numpy array
 	quantized_rgb = np.array(palette_image.convert('RGB'))
 	
-	# Handle alpha channel
-	if preserve_alpha:
-		quantized_alpha = alpha
-	else:
-		# Simplify alpha to binary (transparent/opaque)
-		quantized_alpha = (alpha > 128).astype(np.uint8) * 255
+	# Simplify alpha to binary (transparent/opaque)
+	quantized_alpha = (alpha > 128).astype(np.uint8) * 255
 	
 	# Combine back to RGBA
 	simplified_rgba = np.dstack([quantized_rgb, quantized_alpha])
@@ -223,7 +218,6 @@ def simplify_colors_octree(
 def simplify_colors_threshold(
 	rgba: np.ndarray,
 	num_colors: int = 8,
-	preserve_alpha: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray]:
 	"""
 	Simplify colors using simple thresholding (posterization).
@@ -234,8 +228,6 @@ def simplify_colors_threshold(
 		Input RGBA image, shape (H, W, 4)
 	num_colors: int
 		Number of colors to reduce to (will be rounded to nearest power of 2)
-	preserve_alpha: bool
-		Whether to preserve alpha channel or simplify it too
 		
 	Returns
 	-------
@@ -255,17 +247,19 @@ def simplify_colors_threshold(
 	levels_per_channel = int(np.ceil(np.cbrt(num_colors)))
 	quantization_step = 256 // levels_per_channel
 	
-	# Quantize each channel
+	# Quantize each channel with proper centering to preserve brightness
 	quantized_rgb = np.zeros_like(rgb)
 	for c in range(3):
-		quantized_rgb[:, :, c] = (rgb[:, :, c] // quantization_step) * quantization_step
+		# Use proper quantization that centers the levels
+		# This prevents darkening by mapping to the center of each quantization bin
+		bin_index = np.clip(rgb[:, :, c] // quantization_step, 0, levels_per_channel - 1)
+		# Map to the center of each bin to preserve brightness
+		quantized_rgb[:, :, c] = (bin_index * quantization_step) + (quantization_step // 2)
+		# Ensure we don't exceed 255
+		quantized_rgb[:, :, c] = np.clip(quantized_rgb[:, :, c], 0, 255)
 	
-	# Handle alpha channel
-	if preserve_alpha:
-		quantized_alpha = alpha
-	else:
-		# Simplify alpha to binary (transparent/opaque)
-		quantized_alpha = (alpha > 128).astype(np.uint8) * 255
+	# Simplify alpha to binary (transparent/opaque)
+	quantized_alpha = (alpha > 128).astype(np.uint8) * 255
 	
 	# Combine back to RGBA
 	simplified_rgba = np.dstack([quantized_rgb, quantized_alpha])
@@ -280,7 +274,6 @@ def simplify_colors_threshold(
 def simplify_colors_adaptive(
 	rgba: np.ndarray,
 	target_colors: int = 8,
-	preserve_alpha: bool = True,
 	algorithm: str = "kmeans",
 ) -> Tuple[np.ndarray, np.ndarray]:
 	"""
@@ -292,8 +285,6 @@ def simplify_colors_adaptive(
 		Input RGBA image, shape (H, W, 4)
 	target_colors: int
 		Target number of colors
-	preserve_alpha: bool
-		Whether to preserve alpha channel or simplify it too
 	algorithm: str
 		Algorithm to use: "kmeans", "median_cut", "octree", "threshold", "adaptive", 
 		"perceptual", "adaptive_distance", "hsv_clustering"
@@ -304,21 +295,21 @@ def simplify_colors_adaptive(
 		(simplified_rgba, color_palette)
 	"""
 	if algorithm == "kmeans":
-		return simplify_colors_kmeans(rgba, target_colors, preserve_alpha)
+		return simplify_colors_kmeans(rgba, target_colors)
 	elif algorithm == "median_cut":
-		return simplify_colors_median_cut(rgba, target_colors, preserve_alpha)
+		return simplify_colors_median_cut(rgba, target_colors)
 	elif algorithm == "octree":
-		return simplify_colors_octree(rgba, target_colors, preserve_alpha)
+		return simplify_colors_octree(rgba, target_colors)
 	elif algorithm == "threshold":
-		return simplify_colors_threshold(rgba, target_colors, preserve_alpha)
+		return simplify_colors_threshold(rgba, target_colors)
 	elif algorithm == "perceptual":
-		return simplify_colors_perceptual(rgba, target_colors, preserve_alpha)
+		return simplify_colors_perceptual(rgba, target_colors)
 	elif algorithm == "perceptual_fast":
-		return simplify_colors_perceptual_fast(rgba, target_colors, preserve_alpha)
+		return simplify_colors_perceptual_fast(rgba, target_colors)
 	elif algorithm == "adaptive_distance":
-		return simplify_colors_adaptive_distance(rgba, target_colors, preserve_alpha)
+		return simplify_colors_adaptive_distance(rgba, target_colors)
 	elif algorithm == "hsv_clustering":
-		return simplify_colors_hsv_clustering(rgba, target_colors, preserve_alpha)
+		return simplify_colors_hsv_clustering(rgba, target_colors)
 	elif algorithm == "custom_palette":
 		# For custom palette, we need the palette to be passed separately
 		# This will be handled in the UI layer
@@ -330,16 +321,16 @@ def simplify_colors_adaptive(
 		
 		if total_colors <= target_colors:
 			# Already simplified enough, use threshold
-			return simplify_colors_threshold(rgba, target_colors, preserve_alpha)
+			return simplify_colors_threshold(rgba, target_colors)
 		elif total_colors > 1000:
 			# Many colors, use perceptual clustering for better quality
-			return simplify_colors_perceptual(rgba, target_colors, preserve_alpha)
+			return simplify_colors_perceptual(rgba, target_colors)
 		else:
 			# Moderate colors, use HSV clustering for good balance
-			return simplify_colors_hsv_clustering(rgba, target_colors, preserve_alpha)
+			return simplify_colors_hsv_clustering(rgba, target_colors)
 	else:
 		# Default to K-means
-		return simplify_colors_kmeans(rgba, target_colors, preserve_alpha)
+		return simplify_colors_kmeans(rgba, target_colors)
 
 
 def get_color_statistics(rgba: np.ndarray) -> dict:
@@ -387,7 +378,6 @@ def get_color_statistics(rgba: np.ndarray) -> dict:
 def simplify_colors_perceptual(
 	rgba: np.ndarray,
 	num_colors: int = 8,
-	preserve_alpha: bool = True,
 	color_tolerance: float = 30.0,
 	use_gpu: bool = False,
 	max_samples: int = 10000,
@@ -404,8 +394,6 @@ def simplify_colors_perceptual(
 		Input RGBA image, shape (H, W, 4)
 	num_colors: int
 		Target number of colors
-	preserve_alpha: bool
-		Whether to preserve alpha channel or simplify it too
 	color_tolerance: float
 		Color distance threshold for combining similar colors (0-100)
 	use_gpu: bool
@@ -522,16 +510,18 @@ def simplify_colors_perceptual(
 		# Fit clustering
 		cluster_labels = clustering.fit_predict(lab_colors)
 	
-	# Calculate cluster centers (weighted by frequency)
-	cluster_centers = np.zeros((clustering.n_clusters_, 3))
+	# Calculate cluster centers in LAB space (weighted by frequency)
+	cluster_centers_lab = np.zeros((clustering.n_clusters_, 3))
 	for i in range(clustering.n_clusters_):
 		mask = cluster_labels == i
 		if np.any(mask):
 			# Weight by frequency
 			weights = counts_filtered[mask]
-			cluster_centers[i] = np.average(unique_colors_filtered[mask], weights=weights, axis=0)
+			cluster_centers_lab[i] = np.average(lab_colors[mask], weights=weights, axis=0)
 	
-	cluster_centers = np.clip(cluster_centers, 0, 255).astype(np.uint8)
+	# Convert cluster centers back to RGB for final output
+	cluster_centers_rgb = color.lab2rgb(cluster_centers_lab.reshape(1, -1, 3)).reshape(-1, 3)
+	cluster_centers_rgb = np.clip(cluster_centers_rgb * 255, 0, 255).astype(np.uint8)
 	
 	# Apply color mapping to full image using nearest neighbor
 	quantized_rgb = np.zeros_like(rgb)
@@ -541,28 +531,24 @@ def simplify_colors_perceptual(
 	
 	# Find nearest cluster center for each pixel
 	from sklearn.metrics import pairwise_distances_argmin_min
-	nearest_clusters, _ = pairwise_distances_argmin_min(lab_non_transparent, cluster_centers)
+	nearest_clusters, _ = pairwise_distances_argmin_min(lab_non_transparent, cluster_centers_lab)
 	
-	# Map pixels to cluster centers
-	quantized_rgb[non_transparent] = cluster_centers[nearest_clusters]
+	# Map pixels to cluster centers (using RGB centers for output)
+	# Debug: print cluster information
+	quantized_rgb[non_transparent] = cluster_centers_rgb[nearest_clusters]
 	
-	# Handle alpha channel
-	if preserve_alpha:
-		quantized_alpha = alpha
-	else:
-		# Simplify alpha to binary (transparent/opaque)
-		quantized_alpha = (alpha > 128).astype(np.uint8) * 255
+	# Simplify alpha to binary (transparent/opaque)
+	quantized_alpha = (alpha > 128).astype(np.uint8) * 255
 	
 	# Combine back to RGBA
 	simplified_rgba = np.dstack([quantized_rgb, quantized_alpha])
 	
-	return simplified_rgba, cluster_centers
+	return simplified_rgba, cluster_centers_rgb
 
 
 def simplify_colors_perceptual_fast(
 	rgba: np.ndarray,
 	num_colors: int = 8,
-	preserve_alpha: bool = True,
 	color_tolerance: float = 30.0,
 ) -> Tuple[np.ndarray, np.ndarray]:
 	"""
@@ -577,8 +563,6 @@ def simplify_colors_perceptual_fast(
 		Input RGBA image, shape (H, W, 4)
 	num_colors: int
 		Target number of colors
-	preserve_alpha: bool
-		Whether to preserve alpha channel or simplify it too
 	color_tolerance: float
 		Color distance threshold for combining similar colors (0-100)
 		
@@ -694,12 +678,8 @@ def simplify_colors_perceptual_fast(
 	# Map pixels to cluster centers
 	quantized_rgb[non_transparent] = cluster_centers_rgb[nearest_clusters]
 	
-	# Handle alpha channel
-	if preserve_alpha:
-		quantized_alpha = alpha
-	else:
-		# Simplify alpha to binary (transparent/opaque)
-		quantized_alpha = (alpha > 128).astype(np.uint8) * 255
+	# Simplify alpha to binary (transparent/opaque)
+	quantized_alpha = (alpha > 128).astype(np.uint8) * 255
 	
 	# Combine back to RGBA
 	simplified_rgba = np.dstack([quantized_rgb, quantized_alpha])
@@ -709,8 +689,7 @@ def simplify_colors_perceptual_fast(
 
 def simplify_colors_adaptive_distance(
 	rgba: np.ndarray,
-	num_colors: int = 8,
-	preserve_alpha: bool = True,
+	num_colors: int = 8,	
 	similarity_threshold: float = 25.0,
 ) -> Tuple[np.ndarray, np.ndarray]:
 	"""
@@ -725,8 +704,6 @@ def simplify_colors_adaptive_distance(
 		Input RGBA image, shape (H, W, 4)
 	num_colors: int
 		Target number of colors
-	preserve_alpha: bool
-		Whether to preserve alpha channel or simplify it too
 	similarity_threshold: float
 		Threshold for considering colors similar (0-100)
 		
@@ -812,7 +789,7 @@ def simplify_colors_adaptive_distance(
 		cluster_labels = kmeans.fit_predict(lab_normalized)
 		n_clusters = num_colors
 		unique_labels = np.arange(num_colors)
-	
+		
 	# If we have too many clusters, merge the smallest ones
 	if n_clusters > num_colors:
 		# Count cluster sizes
@@ -860,21 +837,19 @@ def simplify_colors_adaptive_distance(
 	# For pixels that were filtered out (too dark), assign them to the nearest cluster
 	black_pixel_indices = np.where(~non_black_mask)[0]
 	if len(black_pixel_indices) > 0:
-		# Find nearest cluster for black pixels using LAB distance
-		black_pixels_lab = lab_flat[black_pixel_indices]
+		# Find nearest cluster for black pixels using RGB distance to cluster centers
+		black_pixels_rgb = rgb_flat[black_pixel_indices]
 		from sklearn.metrics import pairwise_distances_argmin_min
-		nearest_clusters, _ = pairwise_distances_argmin_min(black_pixels_lab, lab_filtered)
-		all_cluster_labels[black_pixel_indices] = cluster_labels[nearest_clusters]
+		nearest_clusters, _ = pairwise_distances_argmin_min(black_pixels_rgb, cluster_centers)
+		all_cluster_labels[black_pixel_indices] = nearest_clusters
 	
 	# Now map all non-transparent pixels to their cluster centers
+	# Ensure cluster labels are within bounds to prevent indexing errors
+	all_cluster_labels = np.clip(all_cluster_labels, 0, len(cluster_centers) - 1)
 	quantized_rgb[non_transparent] = cluster_centers[all_cluster_labels]
 	
-	# Handle alpha channel
-	if preserve_alpha:
-		quantized_alpha = alpha
-	else:
-		# Simplify alpha to binary (transparent/opaque)
-		quantized_alpha = (alpha > 128).astype(np.uint8) * 255
+	# Simplify alpha to binary (transparent/opaque)
+	quantized_alpha = (alpha > 128).astype(np.uint8) * 255
 	
 	# Combine back to RGBA
 	simplified_rgba = np.dstack([quantized_rgb, quantized_alpha])
@@ -885,7 +860,6 @@ def simplify_colors_adaptive_distance(
 def simplify_colors_hsv_clustering(
 	rgba: np.ndarray,
 	num_colors: int = 8,
-	preserve_alpha: bool = True,
 	hue_tolerance: float = 15.0,
 	saturation_tolerance: float = 0.2,
 ) -> Tuple[np.ndarray, np.ndarray]:
@@ -901,8 +875,6 @@ def simplify_colors_hsv_clustering(
 		Input RGBA image, shape (H, W, 4)
 	num_colors: int
 		Target number of colors
-	preserve_alpha: bool
-		Whether to preserve alpha channel or simplify it too
 	hue_tolerance: float
 		Hue tolerance in degrees (0-180)
 	saturation_tolerance: float
@@ -1021,14 +993,12 @@ def simplify_colors_hsv_clustering(
 		all_cluster_labels[black_pixel_indices] = nearest_clusters
 	
 	# Now map all non-transparent pixels to their cluster centers
+	# Ensure cluster labels are within bounds to prevent indexing errors
+	all_cluster_labels = np.clip(all_cluster_labels, 0, len(cluster_centers) - 1)
 	quantized_rgb[non_transparent] = cluster_centers[all_cluster_labels]
 	
-	# Handle alpha channel
-	if preserve_alpha:
-		quantized_alpha = alpha
-	else:
-		# Simplify alpha to binary (transparent/opaque)
-		quantized_alpha = (alpha > 128).astype(np.uint8) * 255
+	# Simplify alpha to binary (transparent/opaque)
+	quantized_alpha = (alpha > 128).astype(np.uint8) * 255
 	
 	# Combine back to RGBA
 	simplified_rgba = np.dstack([quantized_rgb, quantized_alpha])
@@ -1039,7 +1009,6 @@ def simplify_colors_hsv_clustering(
 def simplify_colors_custom_palette(
 	rgba: np.ndarray,
 	custom_palette: np.ndarray,
-	preserve_alpha: bool = True,
 	distance_metric: str = "lab",
 ) -> Tuple[np.ndarray, np.ndarray]:
 	"""
@@ -1052,9 +1021,7 @@ def simplify_colors_custom_palette(
 	rgba: np.ndarray
 		Input RGBA image, shape (H, W, 4)
 	custom_palette: np.ndarray
-		Custom color palette, shape (N, 3) where N is the number of colors
-	preserve_alpha: bool
-		Whether to preserve alpha channel or simplify it too
+		Custom color palette, shape (N, 3) where N is the number of colors	
 	distance_metric: str
 		Distance metric to use: "lab" (perceptual), "rgb" (Euclidean), "hsv"
 		
@@ -1110,12 +1077,8 @@ def simplify_colors_custom_palette(
 	quantized_rgb = np.zeros_like(rgb)
 	quantized_rgb[non_transparent] = custom_palette[nearest_indices]
 	
-	# Handle alpha channel
-	if preserve_alpha:
-		quantized_alpha = alpha
-	else:
-		# Simplify alpha to binary (transparent/opaque)
-		quantized_alpha = (alpha > 128).astype(np.uint8) * 255
+	# Simplify alpha to binary (transparent/opaque)
+	quantized_alpha = (alpha > 128).astype(np.uint8) * 255
 	
 	# Combine back to RGBA
 	simplified_rgba = np.dstack([quantized_rgb, quantized_alpha])

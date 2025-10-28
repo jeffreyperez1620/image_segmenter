@@ -16,6 +16,7 @@ Date: 2024
 """
 
 import numpy as np
+import time
 from typing import Tuple, List, Dict, Optional
 
 
@@ -25,12 +26,17 @@ class TendrilTrimmer:
     def __init__(self):
         """Initialize the tendril trimmer."""
         # Sentinel values for alpha channel
-        self.NORMAL_PIXEL = 10      # Not a tendril
+        self.NORMAL_PIXEL = 10      # Not a tendril or processed tendril
         self.HORIZONTAL_THIN = 11   # Horizontally thin
         self.VERTICAL_THIN = 12     # Vertically thin
         self.BOTH_THIN = 13         # Both horizontally and vertically thin
+        
+    def log_debug(self,message):
+        with open('tendril_debug.log', 'a') as f:
+            f.write(f"[{time.strftime('%H:%M:%S')}] {message}\n")
+            f.flush()
     
-    def trim_tendrils(self, rgba: np.ndarray, threshold: int, max_iterations: int = 30) -> Tuple[np.ndarray, int, str]:
+    def trim_tendrils(self, rgba: np.ndarray, threshold: int, max_iterations: int = 30, progress_callback: Optional[callable] = None) -> Tuple[np.ndarray, int, str]:
         """
         Trim tendrils from an image using the new alpha sentinel approach.
         
@@ -50,79 +56,130 @@ class TendrilTrimmer:
         if not np.any(alpha > 0):
             return result, 0, "No non-transparent pixels found"
         
-        iteration = 0
+        # Set up transient state for this operation
+        self._rgba = result
+        self._alpha = result[:, :, 3]
+        self._rgb = result[:, :, :3]
+        self._height, self._width = result.shape[:2]
         
-        while iteration < max_iterations:
-            # 1. Mark tendrils and count them
-            tendril_count = self._mark_tendrils(result, threshold)
+        try:
+            iteration = 0
+            pixels_changed = 0
+            total_pixels_changed = 0
             
-            # 2. Early exit if no tendrils found
-            if tendril_count == 0:
-                break
+            # Initial progress update
+            if progress_callback:
+                progress_callback(0, max_iterations, "Starting tendril cleanup...")
+            
+            while iteration < max_iterations:
+                # 1. Mark tendrils and count them
+                tendril_count = self._mark_tendrils(threshold)
                 
-            # 3. Process tendrils (collect changes, then apply)
-            self._process_tendrils(result, threshold)
+                # Progress update for marking phase
+                if progress_callback:
+                    progress_callback(iteration, max_iterations, f"Marked {tendril_count} tendril pixels for correction")
+                
+                # 2. Early exit if no tendrils found
+                if tendril_count == 0:
+                    if progress_callback:
+                        progress_callback(iteration + 1, max_iterations, "No more tendrils found - cleanup complete")
+                    break
+                    
+                # 3. Process tendrils (collect changes, then apply)
+                pixels_changed = self._process_tendrils_priority_queue(threshold)
+                total_pixels_changed += pixels_changed
+                
+                # Progress update for processing phase
+                if progress_callback:
+                    progress_callback(iteration + 1, max_iterations, f"Iteration {iteration + 1}: Changed {pixels_changed} pixels (Total: {total_pixels_changed})")
+                
+                # Check for convergence: if no pixels changed, we're done
+                if pixels_changed == 0:
+                    if progress_callback:
+                        progress_callback(iteration + 1, max_iterations, "No pixels changed - cleanup complete")
+                    break
+                
+                iteration += 1
             
-            iteration += 1
+            # 4. Restore alpha channel to full opacity
+            self._restore_alpha_channel(result)
+            
+            # Final progress update
+            if progress_callback:
+                progress_callback(max_iterations, max_iterations, f"Cleanup complete: {total_pixels_changed} pixels changed in {iteration} iterations")
+            
+            if pixels_changed == 0:
+                return result, iteration, f"Converged after {iteration} iterations - no pixels changed (Total: {total_pixels_changed} pixels changed)"
+            else:
+                return result, iteration, f"Completed after {iteration} iterations (Total: {total_pixels_changed} pixels changed)"
         
-        # 4. Restore alpha channel to full opacity
-        self._restore_alpha_channel(result, rgba)
-        
-        return result, iteration, f"Completed after {iteration} iterations"
+        finally:
+            # Guaranteed cleanup of transient state
+            self._cleanup_transient_state()
     
-    def _mark_tendrils(self, rgba: np.ndarray, threshold: int) -> int:
+    def _cleanup_transient_state(self) -> None:
+        """Clean up transient state after processing."""
+        if hasattr(self, '_rgba'):
+            del self._rgba
+        if hasattr(self, '_alpha'):
+            del self._alpha
+        if hasattr(self, '_rgb'):
+            del self._rgb
+        if hasattr(self, '_height'):
+            del self._height
+        if hasattr(self, '_width'):
+            del self._width
+    
+    def _mark_tendrils(self, threshold: int) -> int:
         """
         Mark tendrils using alpha sentinel values.
         
         Args:
-            rgba: Input image as RGBA numpy array
             threshold: Maximum thickness for a pixel to be considered a tendril
             
         Returns:
             Number of tendril pixels found
         """
-        height, width = rgba.shape[:2]
-        alpha = rgba[:, :, 3]
-        rgb = rgba[:, :, :3]
-        
         # Convert RGB to single integer representation for efficient comparison
-        rgb_int = (rgb[:, :, 0].astype(np.uint32) << 16) | (rgb[:, :, 1].astype(np.uint32) << 8) | rgb[:, :, 2].astype(np.uint32)
+        rgb_int = (self._rgb[:, :, 0].astype(np.uint32) << 16) | (self._rgb[:, :, 1].astype(np.uint32) << 8) | self._rgb[:, :, 2].astype(np.uint32)
         
         tendril_count = 0
         
-        # First, set all non-transparent pixels to NORMAL_PIXEL
-        non_transparent = alpha > 0
-        alpha[non_transparent] = self.NORMAL_PIXEL
+        # First, set all non-transparent pixels to NORMAL_PIXEL (will be reclassified as tendrils if needed)
+        non_transparent = self._alpha > 0
+        self._alpha[non_transparent] = self.NORMAL_PIXEL
         
         # For each pixel, check if it's a tendril
-        for y in range(height):
-            for x in range(width):
+        for y in range(self._height):
+            for x in range(self._width):
+                # Skip transparent pixels
                 if not non_transparent[y, x]:
                     continue
                 
+                # Get current color
                 current_color = rgb_int[y, x]
                 is_horizontal_thin = False
                 is_vertical_thin = False
                 
                 # Check horizontal thickness
-                horizontal_thickness = self._calculate_horizontal_thickness(rgb_int, alpha, x, y, current_color, width)
+                horizontal_thickness = self._calculate_horizontal_thickness(rgb_int, self._alpha, x, y, current_color, self._width)
                 if horizontal_thickness <= threshold:
                     is_horizontal_thin = True
                 
                 # Check vertical thickness
-                vertical_thickness = self._calculate_vertical_thickness(rgb_int, alpha, x, y, current_color, height)
+                vertical_thickness = self._calculate_vertical_thickness(rgb_int, self._alpha, x, y, current_color, self._height)
                 if vertical_thickness <= threshold:
                     is_vertical_thin = True
                 
                 # Mark pixel based on tendril type
                 if is_horizontal_thin and is_vertical_thin:
-                    alpha[y, x] = self.BOTH_THIN
+                    self._alpha[y, x] = self.BOTH_THIN
                     tendril_count += 1
                 elif is_horizontal_thin:
-                    alpha[y, x] = self.HORIZONTAL_THIN
+                    self._alpha[y, x] = self.HORIZONTAL_THIN
                     tendril_count += 1
                 elif is_vertical_thin:
-                    alpha[y, x] = self.VERTICAL_THIN
+                    self._alpha[y, x] = self.VERTICAL_THIN
                     tendril_count += 1
         
         return tendril_count
@@ -131,216 +188,397 @@ class TendrilTrimmer:
         """Calculate horizontal thickness of a pixel."""
         left_dist = 0
         right_dist = 0
+        left_hits_transparent = False
+        right_hits_transparent = False
         
         # Count distance to left
-        for dx in range(1, x + 1):
-            if x - dx < 0 or alpha[y, x - dx] == 0 or rgb_int[y, x - dx] != current_color:
+        for dx in range(1, x + 2):
+            if x - dx < 0 or alpha[y, x - dx] == 0:
+                left_hits_transparent = True
+                break
+            if rgb_int[y, x - dx] != current_color:
                 break
             left_dist += 1
         
         # Count distance to right
-        for dx in range(1, width - x):
-            if x + dx >= width or alpha[y, x + dx] == 0 or rgb_int[y, x + dx] != current_color:
+        for dx in range(1, width - x + 1):
+            if x + dx >= width or alpha[y, x + dx] == 0:
+                right_hits_transparent = True
+                break
+            if rgb_int[y, x + dx] != current_color:
                 break
             right_dist += 1
         
+        # If both ends hit transparent pixels (or boundaries), return infinity
+        if left_hits_transparent and right_hits_transparent:
+            return float('inf')  # Sentinel value: thin only due to transparent borders
+        
+        # Total thickness is the sum of the distances to the left and right plus 1 for the current pixel
         return left_dist + right_dist + 1
     
     def _calculate_vertical_thickness(self, rgb_int: np.ndarray, alpha: np.ndarray, x: int, y: int, current_color: int, height: int) -> int:
         """Calculate vertical thickness of a pixel."""
         up_dist = 0
         down_dist = 0
+        up_hits_transparent = False
+        down_hits_transparent = False
         
         # Count distance up
-        for dy in range(1, y + 1):
-            if y - dy < 0 or alpha[y - dy, x] == 0 or rgb_int[y - dy, x] != current_color:
+        for dy in range(1, y + 2):
+            if y - dy < 0 or alpha[y - dy, x] == 0:
+                up_hits_transparent = True
+                break
+            if rgb_int[y - dy, x] != current_color:
                 break
             up_dist += 1
         
         # Count distance down
-        for dy in range(1, height - y):
-            if y + dy >= height or alpha[y + dy, x] == 0 or rgb_int[y + dy, x] != current_color:
+        for dy in range(1, height - y + 1):
+            if y + dy >= height or alpha[y + dy, x] == 0:
+                down_hits_transparent = True
+                break
+            if rgb_int[y + dy, x] != current_color:
                 break
             down_dist += 1
         
+        # If both ends hit transparent pixels (or boundaries), return infinity
+        if up_hits_transparent and down_hits_transparent:
+            return float('inf')  # Sentinel value: thin only due to transparent borders
+        
+        # Total thickness is the sum of the distances to the up and down plus 1 for the current pixel
         return up_dist + down_dist + 1
     
-    def _process_tendrils(self, rgba: np.ndarray, threshold: int) -> None:
+    def _process_tendrils(self, threshold: int) -> None:
         """
         Process all tendrils by collecting changes and applying them together.
         
         Args:
-            rgba: Input image as RGBA numpy array
             threshold: Maximum thickness for a pixel to be considered a tendril
         """
-        # Process horizontal tendrils first (including BOTH_THIN pixels)
-        self._process_horizontal_tendrils(rgba, threshold)
+        # Process horizontal tendrils first (HORIZONTAL_THIN and BOTH_THIN pixels)
+        self._process_horizontal_tendrils(threshold)
         
-        # Then process vertical tendrils (only VERTICAL_THIN pixels)
-        self._process_vertical_tendrils(rgba, threshold)
+        # Then process vertical tendrils (VERTICAL_THIN and BOTH_THIN pixels)
+        self._process_vertical_tendrils(threshold)
     
-    def _process_horizontal_tendrils(self, rgba: np.ndarray, threshold: int) -> None:
-        """Process horizontal tendrils by scanning horizontally."""
-        height, width = rgba.shape[:2]
-        alpha = rgba[:, :, 3]
-        rgb = rgba[:, :, :3]
+    def _process_tendrils_priority_queue(self, threshold: int) -> int:
+        """
+        Process all tendrils using a priority queue approach.
+        
+        This is a new implementation that processes tendrils iteratively,
+        starting with the most obvious cases (pixels surrounded by many
+        neighbors of the same color) and re-evaluating neighbors as
+        colors change.
+        
+        Args:
+            threshold: Maximum thickness for a pixel to be considered a tendril
+            
+        Returns:
+            Number of pixels that were actually changed
+        """
+        import heapq
+        from collections import defaultdict
+        
+        # Create priority queue (max-heap using negative priorities)
+        # Each item is (-priority, y, x, majority_color)
+        priority_queue = []
+        
+        # Track the latest priority for each pixel to avoid processing outdated entries
+        pixel_priorities = {}
+        
+        # Track number of pixels that actually change color
+        pixels_changed = 0
+        
+        # Find all tendril pixels and calculate their priorities
+        for y in range(self._height):
+            for x in range(self._width):
+                if self._alpha[y, x] in [self.HORIZONTAL_THIN, self.VERTICAL_THIN, self.BOTH_THIN]:
+                    priority, majority_color = self._find_majority_adjacent_color(x, y)
+                    if priority > 0:  # Only add if there are eligible neighbors
+                        heapq.heappush(priority_queue, (-priority, y, x, tuple(majority_color)))
+                        pixel_priorities[(y, x)] = priority
+        
+        # Process the priority queue
+        while priority_queue:
+            # Get the highest priority pixel
+            neg_priority, y, x, majority_color = heapq.heappop(priority_queue)
+            priority = -neg_priority
+            
+            # Skip if this pixel is no longer a tendril (may have been processed already)
+            if self._alpha[y, x] not in [self.HORIZONTAL_THIN, self.VERTICAL_THIN, self.BOTH_THIN]:
+                continue
+            
+            # Skip if this is an outdated entry (pixel has been re-evaluated with higher priority)
+            if (y, x) in pixel_priorities and pixel_priorities[(y, x)] > priority:
+                continue
+            
+            # Check if color actually changes
+            current_color = self._rgb[y, x].copy()
+            new_color = np.array(majority_color, dtype=np.uint8)
+            
+            if not np.array_equal(current_color, new_color):
+                self._rgb[y, x] = new_color
+                pixels_changed += 1
+            
+            # Always de-mark the pixel (it's been processed)
+            self._alpha[y, x] = self.NORMAL_PIXEL
+            
+            # Re-evaluate neighbors that are also tendrils
+            for dy in [-1, 0, 1]:
+                for dx in [-1, 0, 1]:
+                    if dy == 0 and dx == 0:  # Skip the current pixel
+                        continue
+                    
+                    ny, nx = y + dy, x + dx
+                    
+                    # Check bounds
+                    if not (0 <= ny < self._height and 0 <= nx < self._width):
+                        continue
+                    
+                    # Check if neighbor is a tendril
+                    if self._alpha[ny, nx] in [self.HORIZONTAL_THIN, self.VERTICAL_THIN, self.BOTH_THIN]:
+                        # Recalculate priority for this neighbor
+                        new_priority, new_majority_color = self._find_majority_adjacent_color(nx, ny)
+                        
+                        # Add to queue with new priority if it has eligible neighbors
+                        if new_priority > 0:
+                            heapq.heappush(priority_queue, (-new_priority, ny, nx, tuple(new_majority_color)))
+                            pixel_priorities[(ny, nx)] = new_priority
+        
+        return pixels_changed
+    
+    def _find_majority_adjacent_color(self, x: int, y: int) -> tuple[int, np.ndarray]:
+        """
+        Find the majority color of non-tendril neighbors that are different from the current pixel.
+        
+        Args:
+            x, y: Pixel coordinates
+            
+        Returns:
+            Tuple of (count, majority_color) where count is the number of neighbors of the majority color.
+            If no eligible neighbors found, returns (0, current_color).
+        """
+        current_color = self._rgb[y, x]
+        
+        # Check 4-neighbors (cardinal directions only)
+        neighbors = [
+            (y-1, x),   # up
+            (y, x+1),   # right
+            (y+1, x),   # down
+            (y, x-1)    # left
+        ]
+        
+        # Count colors of eligible neighbors
+        neighbor_color_counts = {}
+        
+        for ny, nx in neighbors:
+            # Check bounds
+            if not (0 <= ny < self._height and 0 <= nx < self._width):
+                continue
+                
+            neighbor_alpha = self._alpha[ny, nx]
+            neighbor_color = self._rgb[ny, nx]
+            
+            # Skip if it's not a normal pixel (i.e., it's a tendril or transparent)
+            if neighbor_alpha != self.NORMAL_PIXEL:
+                continue
+                
+            # Skip if same color as current pixel
+            # if np.array_equal(neighbor_color, current_color):
+            #     continue
+            
+            # Count this valid neighbor color
+            color_key = tuple(neighbor_color)
+            neighbor_color_counts[color_key] = neighbor_color_counts.get(color_key, 0) + 1
+            
+        # If no valid neighbors found, return 0 priority
+        if not neighbor_color_counts:
+            return 0, current_color
+        
+        # Find the majority color and its count
+        majority_color_key = max(neighbor_color_counts, key=neighbor_color_counts.get)
+        majority_count = neighbor_color_counts[majority_color_key]
+        majority_color = np.array(majority_color_key, dtype=np.uint8)
+
+        return majority_count, majority_color
+    
+    def _process_horizontal_tendrils(self, threshold: int) -> None:
+        """Process horizontal tendrils by scanning horizontally. Handles HORIZONTAL_THIN and BOTH_THIN pixels."""
         
         # Collect all changes before applying them
         changes = {}  # (y, x) -> new_color
         
-        for y in range(height):
+        for y in range(self._height):
             x = 0
-            while x < width:
-                if alpha[y, x] in [self.HORIZONTAL_THIN, self.BOTH_THIN]:
+            while x < self._width:
+                if self._alpha[y, x] in [self.HORIZONTAL_THIN, self.BOTH_THIN]:
                     # Found start of horizontal tendril
-                    scan_line_info = self._scan_horizontal_line(rgba, x, y, threshold)
+                    scan_line_info = self._scan_horizontal_line(x, y)
                     if scan_line_info:
+                        # Scan line info is a tuple of (start_x, end_x, majority_color)
                         start_x, end_x, majority_color = scan_line_info
+                        line_length = end_x - start_x + 1
                         
-                        if end_x - start_x + 1 > threshold:
-                            # Scan line is long enough - set all pixels to majority color
-                            for px in range(start_x, end_x + 1):
-                                if alpha[y, px] in [self.HORIZONTAL_THIN, self.BOTH_THIN]:
-                                    changes[(y, px)] = majority_color
-                        else:
+                        #if line_length > threshold:
+                        #    # This indicates that multiple different colored tendrils are connected
+                        #    # Scan line is long enough - set all pixels to majority color
+                        #    for px in range(start_x, end_x + 1):
+                        #        changes[(y, px)] = majority_color
+                        #else:
                             # Scan line is too short - use adjacent non-tendril colors
-                            for px in range(start_x, end_x + 1):
-                                if alpha[y, px] in [self.HORIZONTAL_THIN, self.BOTH_THIN]:
-                                    new_color = self._find_adjacent_color(rgba, px, y)
-                                    if new_color is not None:
-                                        changes[(y, px)] = new_color
-                        
+                        for px in range(start_x, end_x + 1):
+                            count, new_color = self._find_majority_adjacent_color(px, y)
+                            if count > 0:
+                                changes[(y, px)] = new_color
+                            else:
+                                # no adjacent non-tendril color found, use the current color
+                                # re-evaluate if this pixel is a tendril on next iteration
+                                changes[(y, px)] = self._rgb[y, px]
+                    
                         x = end_x + 1  # Skip to end of scan line
                     else:
+                        # This should not happen - scan_line_info should always be returned for a tendril pixel
+                        print(f"WARNING: _scan_horizontal_line returned None for tendril pixel at ({y}, {x})")
                         x += 1
                 else:
+                    # Not a tendril pixel - move to next pixel
                     x += 1
         
         # Apply all changes
         for (y, x), new_color in changes.items():
-            rgb[y, x] = new_color
-            alpha[y, x] = self.NORMAL_PIXEL  # Mark as processed
+            self._rgb[y, x] = new_color
+            self._alpha[y, x] = self.NORMAL_PIXEL  # Mark as processed
     
-    def _process_vertical_tendrils(self, rgba: np.ndarray, threshold: int) -> None:
-        """Process vertical tendrils by scanning vertically."""
-        height, width = rgba.shape[:2]
-        alpha = rgba[:, :, 3]
-        rgb = rgba[:, :, :3]
+    def _process_vertical_tendrils(self, threshold: int) -> None:
+        """Process vertical tendrils by scanning vertically. Handles VERTICAL_THIN and BOTH_THIN pixels."""
         
         # Collect all changes before applying them
         changes = {}  # (y, x) -> new_color
         
-        for x in range(width):
+        for x in range(self._width):
             y = 0
-            while y < height:
-                if alpha[y, x] == self.VERTICAL_THIN:
+            while y < self._height:
+                if self._alpha[y, x] in [self.VERTICAL_THIN, self.BOTH_THIN]:
                     # Found start of vertical tendril
-                    scan_line_info = self._scan_vertical_line(rgba, x, y, threshold)
+                    scan_line_info = self._scan_vertical_line(x, y)
                     if scan_line_info:
                         start_y, end_y, majority_color = scan_line_info
                         
-                        if end_y - start_y + 1 > threshold:
-                            # Scan line is long enough - set all pixels to majority color
-                            for py in range(start_y, end_y + 1):
-                                if alpha[py, x] == self.VERTICAL_THIN:
-                                    changes[(py, x)] = majority_color
-                        else:
+                        #if end_y - start_y + 1 > threshold:
+                        #    # Scan line is long enough - set all pixels to majority color
+                        #    for py in range(start_y, end_y + 1):
+                        #        changes[(py, x)] = majority_color
+                        #else:
                             # Scan line is too short - use adjacent non-tendril colors
-                            for py in range(start_y, end_y + 1):
-                                if alpha[py, x] == self.VERTICAL_THIN:
-                                    new_color = self._find_adjacent_color(rgba, x, py)
-                                    if new_color is not None:
-                                        changes[(py, x)] = new_color
-                        
+                        for py in range(start_y, end_y + 1):
+                            count, new_color = self._find_majority_adjacent_color(x, py)
+                            if count > 0:
+                                changes[(py, x)] = new_color 
+                            else:
+                                # no adjacent non-tendril color found, use the current color
+                                # re-evaluate if this pixel is a tendril on next iteration
+                                changes[(py, x)] = self._rgb[py, x]
+                    
                         y = end_y + 1  # Skip to end of scan line
                     else:
+                        # This should not happen - scan_line_info should always be returned for a tendril pixel
+                        print(f"WARNING: _scan_vertical_line returned None for tendril pixel at ({y}, {x})")
                         y += 1
                 else:
                     y += 1
         
         # Apply all changes
         for (y, x), new_color in changes.items():
-            rgb[y, x] = new_color
-            alpha[y, x] = self.NORMAL_PIXEL  # Mark as processed
+            self._rgb[y, x] = new_color
+            self._alpha[y, x] = self.NORMAL_PIXEL  # Mark as processed
     
-    def _scan_horizontal_line(self, rgba: np.ndarray, start_x: int, y: int, threshold: int) -> Optional[Tuple[int, int, np.ndarray]]:
+    def _scan_horizontal_line(self, start_x: int, y: int) -> Optional[Tuple[int, int, np.ndarray]]:
         """Scan horizontally to find the extent of a tendril line and determine majority color."""
-        width = rgba.shape[1]
-        alpha = rgba[:, :, 3]
-        rgb = rgba[:, :, :3]
+        # Example: [NORMAL_PIXEL], red, red, blue, red, [NORMAL_PIXEL]
+        # all 4 pixels are tendril pixels, but the majority color is red
+        # if there is a tie, the leftmost color is used
+        # if there is no tendril pixel in the scan line, return None
+        # if there is only one tendril pixel in the scan line, return the color of that pixel
+        # if there are multiple tendril pixels in the scan line, return the color that appears most frequently
         
         # Find the extent of the tendril line
         end_x = start_x
-        while end_x + 1 < width and alpha[y, end_x + 1] in [self.HORIZONTAL_THIN, self.BOTH_THIN]:
+        while end_x + 1 < self._width and self._alpha[y, end_x + 1] in [self.HORIZONTAL_THIN, self.BOTH_THIN]:
             end_x += 1
         
         # Count colors in the scan line
         color_counts = {}
         for x in range(start_x, end_x + 1):
-            if alpha[y, x] in [self.HORIZONTAL_THIN, self.BOTH_THIN]:
-                color_key = tuple(rgb[y, x])
-                color_counts[color_key] = color_counts.get(color_key, 0) + 1
+            color_key = tuple(self._rgb[y, x])
+            color_counts[color_key] = color_counts.get(color_key, 0) + 1
         
         if not color_counts:
             return None
         
-        # Find majority color (use leftmost in case of tie)
-        majority_color = max(color_counts, key=lambda k: (color_counts[k], -list(color_counts.keys()).index(k)))
+        # Find majority color
+        majority_color = self._find_majority_color(color_counts)
         
-        return start_x, end_x, np.array(majority_color, dtype=np.uint8)
+        return start_x, end_x, majority_color
     
-    def _scan_vertical_line(self, rgba: np.ndarray, x: int, start_y: int, threshold: int) -> Optional[Tuple[int, int, np.ndarray]]:
+    def _scan_vertical_line(self, x: int, start_y: int) -> Optional[Tuple[int, int, np.ndarray]]:
         """Scan vertically to find the extent of a tendril line and determine majority color."""
-        height = rgba.shape[0]
-        alpha = rgba[:, :, 3]
-        rgb = rgba[:, :, :3]
+        # Example: [NORMAL_PIXEL], red, red, blue, red, [NORMAL_PIXEL]
+        # all 4 pixels are tendril pixels, but the majority color is red
+        # if there is a tie, the leftmost color is used
+        # if there is no tendril pixel in the scan line, return None
+        # if there is only one tendril pixel in the scan line, return the color of that pixel
+        # if there are multiple tendril pixels in the scan line, return the color that appears most frequently
         
         # Find the extent of the tendril line
         end_y = start_y
-        while end_y + 1 < height and alpha[end_y + 1, x] == self.VERTICAL_THIN:
+        while end_y + 1 < self._height and self._alpha[end_y + 1, x] in [self.VERTICAL_THIN, self.BOTH_THIN]:
             end_y += 1
         
         # Count colors in the scan line
         color_counts = {}
         for y in range(start_y, end_y + 1):
-            if alpha[y, x] == self.VERTICAL_THIN:
-                color_key = tuple(rgb[y, x])
-                color_counts[color_key] = color_counts.get(color_key, 0) + 1
+            color_key = tuple(self._rgb[y, x])
+            color_counts[color_key] = color_counts.get(color_key, 0) + 1
         
         if not color_counts:
             return None
         
-        # Find majority color (use topmost in case of tie)
+        # Find majority color
+        majority_color = self._find_majority_color(color_counts)
+        
+        return start_y, end_y, majority_color
+    
+    def _find_majority_color(self, color_counts: Dict[Tuple[int, ...], int]) -> np.ndarray:
+        """Find the majority color from a dictionary of color counts with tie-breaking."""
+        if not color_counts:
+            raise ValueError("color_counts cannot be empty")
+        
+        # Find the majority color (use first encountered in case of tie)
         majority_color = max(color_counts, key=lambda k: (color_counts[k], -list(color_counts.keys()).index(k)))
         
-        return start_y, end_y, np.array(majority_color, dtype=np.uint8)
+        return np.array(majority_color, dtype=np.uint8)
     
-    def _find_adjacent_color(self, rgba: np.ndarray, x: int, y: int) -> Optional[np.ndarray]:
-        """Find a non-tendril color adjacent to the given pixel."""
-        height, width = rgba.shape[:2]
-        alpha = rgba[:, :, 3]
-        rgb = rgba[:, :, :3]
-        
-        # Check 4-neighbors
-        neighbors = [
-            (y-1, x),   # up
-            (y+1, x),   # down
-            (y, x-1),   # left
-            (y, x+1)    # right
-        ]
-        
-        for ny, nx in neighbors:
-            if (0 <= ny < height and 0 <= nx < width and 
-                alpha[ny, nx] == self.NORMAL_PIXEL):
-                return rgb[ny, nx].copy()
-        
-        return None
-    
-    def _restore_alpha_channel(self, result: np.ndarray, original: np.ndarray) -> None:
-        """Restore alpha channel to full opacity for all non-transparent pixels."""
+    def _restore_alpha_channel(self, result: np.ndarray) -> None:
+        """Restore alpha channel to full opacity for all originally non-transparent pixels."""
         # Set alpha to 255 for all pixels that were originally non-transparent
-        original_non_transparent = original[:, :, 3] > 0
-        result[original_non_transparent, 3] = 255
+        result_non_transparent = result[:, :, 3] > 0
+        result[result_non_transparent, 3] = 255
+    
+
+    def _mark_tendrils_for_iteration(self, rgba: np.ndarray, threshold: int) -> int:
+        """
+        Mark tendrils for one iteration.
+        """
+        # Set up transient state for this operation
+        self._rgba = rgba
+        self._alpha = rgba[:, :, 3]
+        self._rgb = rgba[:, :, :3]
+        self._height, self._width = rgba.shape[:2]
+
+        # Mark tendrils
+        tendril_count = self._mark_tendrils(threshold)
+        
+        return tendril_count
     
     # Backward compatibility methods for the test app
     def _trim_tendrils_in_iteration(self, rgba: np.ndarray, threshold: int) -> int:
@@ -348,49 +586,26 @@ class TendrilTrimmer:
         Backward compatibility method for the test app.
         This method runs one iteration of the new algorithm and returns the number of pixels changed.
         """
+        # Set up transient state for this operation
+        self._rgba = rgba
+        self._alpha = rgba[:, :, 3]
+        self._rgb = rgba[:, :, :3]
+        self._height, self._width = rgba.shape[:2]
+        
         # Mark tendrils
-        tendril_count = self._mark_tendrils(rgba, threshold)
+        tendril_count = self._mark_tendrils(threshold)
         
         if tendril_count == 0:
             return 0
         
         # Process tendrils
-        self._process_tendrils(rgba, threshold)
+        self._process_tendrils_priority_queue(threshold)
         
         return tendril_count
-    
-    def _apply_color_selection_to_magenta(self, rgba: np.ndarray) -> int:
-        """
-        Backward compatibility method for the test app.
-        This method processes any remaining tendril pixels and returns the number of pixels recolored.
-        """
-        height, width = rgba.shape[:2]
-        alpha = rgba[:, :, 3]
-        rgb = rgba[:, :, :3]
-        
-        pixels_recolored = 0
-        
-        # Find pixels that are still marked as tendrils
-        for y in range(height):
-            for x in range(width):
-                if alpha[y, x] in [self.HORIZONTAL_THIN, self.VERTICAL_THIN, self.BOTH_THIN]:
-                    # Find adjacent non-tendril color
-                    new_color = self._find_adjacent_color(rgba, x, y)
-                    if new_color is not None:
-                        rgb[y, x] = new_color
-                        alpha[y, x] = self.NORMAL_PIXEL
-                        pixels_recolored += 1
-                    else:
-                        # Fallback: use a default color
-                        rgb[y, x] = [128, 128, 128]  # Gray
-                        alpha[y, x] = self.NORMAL_PIXEL
-                        pixels_recolored += 1
-        
-        return pixels_recolored
 
 
 # Convenience function for easy usage
-def trim_tendrils(rgba: np.ndarray, threshold: int, max_iterations: int = 30) -> Tuple[np.ndarray, int, str]:
+def trim_tendrils(rgba: np.ndarray, threshold: int, max_iterations: int = 30, progress_callback: Optional[callable] = None) -> Tuple[np.ndarray, int, str]:
     """
     Convenience function to trim tendrils from an image.
     
@@ -398,9 +613,10 @@ def trim_tendrils(rgba: np.ndarray, threshold: int, max_iterations: int = 30) ->
         rgba: Input image as RGBA numpy array
         threshold: Maximum thickness for a pixel to be considered a tendril
         max_iterations: Maximum number of iterations to perform
+        progress_callback: Optional callback function for progress updates (current, total, message)
         
     Returns:
         Tuple of (processed_image, iterations_used, status_message)
     """
     trimmer = TendrilTrimmer()
-    return trimmer.trim_tendrils(rgba, threshold, max_iterations)
+    return trimmer.trim_tendrils(rgba, threshold, max_iterations, progress_callback)

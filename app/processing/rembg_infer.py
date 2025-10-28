@@ -17,6 +17,7 @@ def _get_session(model: str) -> object:
 	with _sessions_lock:
 		sess = _sessions.get(model)
 		if sess is None:
+			# Defer model loading until first use
 			sess = new_session(model)
 			_sessions[model] = sess
 		return sess
@@ -43,7 +44,7 @@ def _resize_rgba(rgba: np.ndarray, target_hw: Tuple[int, int]) -> np.ndarray:
 	return np.array(img, dtype=np.uint8)
 
 
-def rembg_remove_bgr_to_rgba(bgr: np.ndarray, model: Optional[str] = None, target_hw: Optional[Tuple[int, int]] = None, sharp_edges: bool = True) -> np.ndarray:
+def rembg_remove_bgr_to_rgba(bgr: np.ndarray, model: Optional[str] = None, target_hw: Optional[Tuple[int, int]] = None, sharp_edges: bool = False) -> np.ndarray:
 	if bgr.dtype != np.uint8 or bgr.ndim != 3 or bgr.shape[2] != 3:
 		raise ValueError("bgr must be HxWx3 uint8")
 	rgb = bgr[:, :, ::-1]
@@ -66,6 +67,7 @@ def rembg_remove_bgr_to_rgba(bgr: np.ndarray, model: Optional[str] = None, targe
 	rgba = _resize_rgba(rgba, target_hw)
 	
 	# Convert smooth alpha to sharp binary alpha if requested
+	# Note: sharp_edges=False by default to preserve original alpha values for opacity threshold control
 	if sharp_edges:
 		rgba = _make_alpha_sharp(rgba)
 	
