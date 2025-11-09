@@ -67,26 +67,60 @@ class TendrilTrimmer:
             pixels_changed = 0
             total_pixels_changed = 0
             
+            # Track changed pixels for incremental evaluation
+            changed_pixels: set[Tuple[int, int]] = set()  # Set of (y, x) coordinates
+            # Track tendril locations for localized mode
+            tendril_locations: set[Tuple[int, int]] = set()  # Set of (y, x) coordinates of known tendrils
+            total_pixels = np.sum(alpha > 0)
+            localized_threshold = max(100, int(total_pixels * 0.01))  # 1% of image or 100 pixels, whichever is larger
+            use_localized_mode = False
+            
             # Initial progress update
             if progress_callback:
                 progress_callback(0, max_iterations, "Starting tendril cleanup...")
             
             while iteration < max_iterations:
                 # 1. Mark tendrils and count them
-                tendril_count = self._mark_tendrils(threshold)
+                # Use incremental evaluation after first iteration
+                if iteration == 0:
+                    # First iteration: evaluate entire image
+                    tendril_count = self._mark_tendrils(threshold)
+                else:
+                    # Subsequent iterations: use incremental or localized mode
+                    if use_localized_mode:
+                        # Localized mode: only evaluate regions around known tendrils
+                        # Combine changed pixels and known tendril locations
+                        evaluation_set = changed_pixels | tendril_locations
+                        tendril_count = self._mark_tendrils_localized(threshold, evaluation_set)
+                    else:
+                        # Incremental mode: evaluate changed pixels + neighbors
+                        tendril_count = self._mark_tendrils_incremental(threshold, changed_pixels)
+                
+                # Update tendril locations for next iteration (after marking, before processing)
+                if tendril_count > 0:
+                    tendril_locations = self._get_tendril_locations()
+                else:
+                    tendril_locations.clear()
                 
                 # Progress update for marking phase
                 if progress_callback:
-                    progress_callback(iteration, max_iterations, f"Marked {tendril_count} tendril pixels for correction")
+                    mode_str = "localized" if use_localized_mode else ("incremental" if iteration > 0 else "full")
+                    progress_callback(iteration, max_iterations, f"Marked {tendril_count} tendril pixels ({mode_str} mode)")
                 
                 # 2. Early exit if no tendrils found
                 if tendril_count == 0:
                     if progress_callback:
                         progress_callback(iteration + 1, max_iterations, "No more tendrils found - cleanup complete")
                     break
+                
+                # 3. Check if we should switch to localized mode
+                if not use_localized_mode and tendril_count < localized_threshold:
+                    use_localized_mode = True
+                    if progress_callback:
+                        progress_callback(iteration, max_iterations, f"Switching to localized mode ({tendril_count} tendrils remaining)")
                     
-                # 3. Process tendrils (collect changes, then apply)
-                pixels_changed = self._process_tendrils_priority_queue(threshold)
+                # 4. Process tendrils (collect changes, then apply)
+                pixels_changed, changed_pixels = self._process_tendrils_priority_queue(threshold)
                 total_pixels_changed += pixels_changed
                 
                 # Progress update for processing phase
@@ -184,6 +218,155 @@ class TendrilTrimmer:
         
         return tendril_count
     
+    def _mark_tendrils_incremental(self, threshold: int, changed_pixels: set[Tuple[int, int]], buffer: int = 3) -> int:
+        """
+        Mark tendrils using incremental evaluation - only evaluates changed pixels and their neighbors.
+        
+        Args:
+            threshold: Maximum thickness for a pixel to be considered a tendril
+            changed_pixels: Set of (y, x) coordinates that changed in the previous iteration
+            buffer: Number of pixels around changed pixels to also evaluate
+            
+        Returns:
+            Number of tendril pixels found
+        """
+        # Convert RGB to single integer representation for efficient comparison
+        rgb_int = (self._rgb[:, :, 0].astype(np.uint32) << 16) | (self._rgb[:, :, 1].astype(np.uint32) << 8) | self._rgb[:, :, 2].astype(np.uint32)
+        
+        # Build set of pixels to evaluate: changed pixels + their neighbors + buffer
+        pixels_to_evaluate: set[Tuple[int, int]] = set()
+        non_transparent = self._alpha > 0
+        
+        for y, x in changed_pixels:
+            # Add the changed pixel itself
+            pixels_to_evaluate.add((y, x))
+            
+            # Add neighbors within buffer distance
+            for dy in range(-buffer, buffer + 1):
+                for dx in range(-buffer, buffer + 1):
+                    ny, nx = y + dy, x + dx
+                    if 0 <= ny < self._height and 0 <= nx < self._width and non_transparent[ny, nx]:
+                        pixels_to_evaluate.add((ny, nx))
+        
+        # Reset previously marked tendrils in the evaluation region to NORMAL_PIXEL
+        for y, x in pixels_to_evaluate:
+            if non_transparent[y, x]:
+                self._alpha[y, x] = self.NORMAL_PIXEL
+        
+        tendril_count = 0
+        
+        # Evaluate only the pixels in our set
+        for y, x in pixels_to_evaluate:
+            if not non_transparent[y, x]:
+                continue
+            
+            # Get current color
+            current_color = rgb_int[y, x]
+            is_horizontal_thin = False
+            is_vertical_thin = False
+            
+            # Check horizontal thickness
+            horizontal_thickness = self._calculate_horizontal_thickness(rgb_int, self._alpha, x, y, current_color, self._width)
+            if horizontal_thickness <= threshold:
+                is_horizontal_thin = True
+            
+            # Check vertical thickness
+            vertical_thickness = self._calculate_vertical_thickness(rgb_int, self._alpha, x, y, current_color, self._height)
+            if vertical_thickness <= threshold:
+                is_vertical_thin = True
+            
+            # Mark pixel based on tendril type
+            if is_horizontal_thin and is_vertical_thin:
+                self._alpha[y, x] = self.BOTH_THIN
+                tendril_count += 1
+            elif is_horizontal_thin:
+                self._alpha[y, x] = self.HORIZONTAL_THIN
+                tendril_count += 1
+            elif is_vertical_thin:
+                self._alpha[y, x] = self.VERTICAL_THIN
+                tendril_count += 1
+        
+        return tendril_count
+    
+    def _mark_tendrils_localized(self, threshold: int, changed_pixels: set[Tuple[int, int]], buffer: int = 5) -> int:
+        """
+        Mark tendrils using localized evaluation - only evaluates regions around known tendril locations.
+        
+        Args:
+            threshold: Maximum thickness for a pixel to be considered a tendril
+            changed_pixels: Set of (y, x) coordinates that changed in the previous iteration
+            buffer: Number of pixels around changed pixels to evaluate (larger for localized mode)
+            
+        Returns:
+            Number of tendril pixels found
+        """
+        # Convert RGB to single integer representation for efficient comparison
+        rgb_int = (self._rgb[:, :, 0].astype(np.uint32) << 16) | (self._rgb[:, :, 1].astype(np.uint32) << 8) | self._rgb[:, :, 2].astype(np.uint32)
+        
+        # Build set of pixels to evaluate: changed pixels + larger buffer zone
+        pixels_to_evaluate: set[Tuple[int, int]] = set()
+        non_transparent = self._alpha > 0
+        
+        for y, x in changed_pixels:
+            # Add neighbors within buffer distance (larger buffer for localized mode)
+            for dy in range(-buffer, buffer + 1):
+                for dx in range(-buffer, buffer + 1):
+                    ny, nx = y + dy, x + dx
+                    if 0 <= ny < self._height and 0 <= nx < self._width and non_transparent[ny, nx]:
+                        pixels_to_evaluate.add((ny, nx))
+        
+        # Also check for any remaining marked tendrils from previous iteration
+        # (This is a safety check - in normal operation, tendrils should be processed and unmarked)
+        for y in range(self._height):
+            for x in range(self._width):
+                if self._alpha[y, x] in [self.HORIZONTAL_THIN, self.VERTICAL_THIN, self.BOTH_THIN]:
+                    # Add this pixel and its neighbors to evaluation set
+                    for dy in range(-buffer, buffer + 1):
+                        for dx in range(-buffer, buffer + 1):
+                            ny, nx = y + dy, x + dx
+                            if 0 <= ny < self._height and 0 <= nx < self._width and non_transparent[ny, nx]:
+                                pixels_to_evaluate.add((ny, nx))
+        
+        # Reset previously marked tendrils in the evaluation region to NORMAL_PIXEL
+        for y, x in pixels_to_evaluate:
+            if non_transparent[y, x]:
+                self._alpha[y, x] = self.NORMAL_PIXEL
+        
+        tendril_count = 0
+        
+        # Evaluate only the pixels in our set
+        for y, x in pixels_to_evaluate:
+            if not non_transparent[y, x]:
+                continue
+            
+            # Get current color
+            current_color = rgb_int[y, x]
+            is_horizontal_thin = False
+            is_vertical_thin = False
+            
+            # Check horizontal thickness
+            horizontal_thickness = self._calculate_horizontal_thickness(rgb_int, self._alpha, x, y, current_color, self._width)
+            if horizontal_thickness <= threshold:
+                is_horizontal_thin = True
+            
+            # Check vertical thickness
+            vertical_thickness = self._calculate_vertical_thickness(rgb_int, self._alpha, x, y, current_color, self._height)
+            if vertical_thickness <= threshold:
+                is_vertical_thin = True
+            
+            # Mark pixel based on tendril type
+            if is_horizontal_thin and is_vertical_thin:
+                self._alpha[y, x] = self.BOTH_THIN
+                tendril_count += 1
+            elif is_horizontal_thin:
+                self._alpha[y, x] = self.HORIZONTAL_THIN
+                tendril_count += 1
+            elif is_vertical_thin:
+                self._alpha[y, x] = self.VERTICAL_THIN
+                tendril_count += 1
+        
+        return tendril_count
+    
     def _calculate_horizontal_thickness(self, rgb_int: np.ndarray, alpha: np.ndarray, x: int, y: int, current_color: int, width: int) -> int:
         """Calculate horizontal thickness of a pixel."""
         left_dist = 0
@@ -261,7 +444,7 @@ class TendrilTrimmer:
         # Then process vertical tendrils (VERTICAL_THIN and BOTH_THIN pixels)
         self._process_vertical_tendrils(threshold)
     
-    def _process_tendrils_priority_queue(self, threshold: int) -> int:
+    def _process_tendrils_priority_queue(self, threshold: int) -> Tuple[int, set[Tuple[int, int]]]:
         """
         Process all tendrils using a priority queue approach.
         
@@ -274,7 +457,7 @@ class TendrilTrimmer:
             threshold: Maximum thickness for a pixel to be considered a tendril
             
         Returns:
-            Number of pixels that were actually changed
+            Tuple of (number of pixels changed, set of changed pixel coordinates (y, x))
         """
         import heapq
         from collections import defaultdict
@@ -288,6 +471,7 @@ class TendrilTrimmer:
         
         # Track number of pixels that actually change color
         pixels_changed = 0
+        changed_pixels: set[Tuple[int, int]] = set()
         
         # Find all tendril pixels and calculate their priorities
         for y in range(self._height):
@@ -319,6 +503,7 @@ class TendrilTrimmer:
             if not np.array_equal(current_color, new_color):
                 self._rgb[y, x] = new_color
                 pixels_changed += 1
+                changed_pixels.add((y, x))
             
             # Always de-mark the pixel (it's been processed)
             self._alpha[y, x] = self.NORMAL_PIXEL
@@ -345,7 +530,7 @@ class TendrilTrimmer:
                             heapq.heappush(priority_queue, (-new_priority, ny, nx, tuple(new_majority_color)))
                             pixel_priorities[(ny, nx)] = new_priority
         
-        return pixels_changed
+        return pixels_changed, changed_pixels
     
     def _find_majority_adjacent_color(self, x: int, y: int) -> tuple[int, np.ndarray]:
         """
@@ -558,6 +743,20 @@ class TendrilTrimmer:
         
         return np.array(majority_color, dtype=np.uint8)
     
+    def _get_tendril_locations(self) -> set[Tuple[int, int]]:
+        """
+        Get the set of coordinates of all currently marked tendril pixels.
+        
+        Returns:
+            Set of (y, x) coordinates of tendril pixels
+        """
+        tendril_locations: set[Tuple[int, int]] = set()
+        for y in range(self._height):
+            for x in range(self._width):
+                if self._alpha[y, x] in [self.HORIZONTAL_THIN, self.VERTICAL_THIN, self.BOTH_THIN]:
+                    tendril_locations.add((y, x))
+        return tendril_locations
+    
     def _restore_alpha_channel(self, result: np.ndarray) -> None:
         """Restore alpha channel to full opacity for all originally non-transparent pixels."""
         # Set alpha to 255 for all pixels that were originally non-transparent
@@ -599,9 +798,9 @@ class TendrilTrimmer:
             return 0
         
         # Process tendrils
-        self._process_tendrils_priority_queue(threshold)
+        pixels_changed, _ = self._process_tendrils_priority_queue(threshold)
         
-        return tendril_count
+        return pixels_changed
 
 
 # Convenience function for easy usage
