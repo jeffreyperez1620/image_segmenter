@@ -73,11 +73,15 @@ class BaseStep(QWidget):
     
     def set_main_widget(self, widget: QWidget):
         """Set the main widget for this step."""
+        from PySide6.QtWidgets import QSizePolicy
+        
         # Clear existing main widget
         if hasattr(self, '_main_widget'):
             self._main_widget.deleteLater()
         
         self._main_widget = widget
+        # Set size policy to allow expansion
+        self._main_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         # Only create a layout if the widget doesn't already have one
         if self._main_widget.layout() is None:
             self._main_layout = QVBoxLayout(self._main_widget)
@@ -92,6 +96,24 @@ class BaseStep(QWidget):
             layout = QVBoxLayout(self)
             layout.addWidget(self._main_widget)
             self._init_common_controls(layout)
+    
+    def enable_main_widget_stretch(self):
+        """Enable stretching of the main widget to push controls to the bottom."""
+        main_layout = self.layout()
+        if main_layout is not None:
+            # The main widget should be at index 0, controls layout should be at the end
+            # We want to add a stretch at index 1 (after main widget, before controls)
+            item_count = main_layout.count()
+            if item_count >= 2:
+                # Check if there's already a stretch at index 1
+                item = main_layout.itemAt(1)
+                # If item doesn't exist or is not a spacer, add a stretch
+                if item is None:
+                    # No item at index 1, add a stretch
+                    main_layout.insertStretch(1, 1)
+                elif item.spacerItem() is None:
+                    # Item exists but is not a spacer, insert stretch before it
+                    main_layout.insertStretch(1, 1)
     
     def set_base_image(self, image: np.ndarray):
         """Set the base image."""

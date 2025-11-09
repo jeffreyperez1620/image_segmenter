@@ -42,7 +42,34 @@ class MainWindow(QMainWindow):
 	def __init__(self) -> None:
 		super().__init__()
 		self.setWindowTitle("Image Segmenter & SVG Layout")
-		self.resize(1200, 400)
+		
+		# Set minimum window size
+		self.setMinimumSize(800, 600)
+		
+		# Get screen geometry
+		screen = QApplication.primaryScreen()
+		if screen is not None:
+			screen_geometry = screen.availableGeometry()
+			screen_width = screen_geometry.width()
+			screen_height = screen_geometry.height()
+			
+			# Calculate initial size: half of screen dimensions
+			initial_width = screen_width // 4 * 3
+			initial_height = screen_height // 4 * 3
+			
+			# Ensure minimum size
+			initial_width = max(initial_width, 800)
+			initial_height = max(initial_height, 800)
+			
+			# Calculate position to center the window
+			x = (screen_width - initial_width) // 2
+			y = (screen_height - initial_height) // 2
+			
+			# Set geometry (position and size)
+			self.setGeometry(x, y, initial_width, initial_height)
+		else:
+			# Fallback if screen is not available
+			self.resize(1200, 800)
 		
 		# Initialize application state
 		self._app_state = AppState()
@@ -178,9 +205,18 @@ class MainWindow(QMainWindow):
 		if hasattr(self, '_previous_tab_index'):
 			prevTab = self._tab_widget.widget(self._previous_tab_index)
 			if prevTab is not None and isinstance(prevTab, BaseStep):
+				# Disconnect status bar message signal
+				if hasattr(prevTab, 'statusBarMessage'):
+					try:
+						prevTab.statusBarMessage.disconnect(self._on_status_bar_message)
+					except:
+						pass
 				prevTab._on_close()
 		currentTab = self._tab_widget.widget(index)
 		if currentTab is not None and isinstance(currentTab, BaseStep):
+			# Connect status bar message signal
+			if hasattr(currentTab, 'statusBarMessage'):
+				currentTab.statusBarMessage.connect(self._on_status_bar_message)
 			currentTab._on_open()		
 		self._previous_tab_index = index
 		if index == 0:  # Background Removal tab

@@ -39,6 +39,8 @@ class FloodFillView(QWidget):
         """Activate or deactivate the flood fill view."""
         self._active = active
         if active:
+            # Update geometry before showing to ensure it covers the full area
+            self._update_geometry()
             self.show()
             # Hide the system cursor and set a custom cursor
             self._image_view._view.viewport().setCursor(Qt.BlankCursor)
@@ -47,6 +49,17 @@ class FloodFillView(QWidget):
             self._image_view._view.viewport().unsetCursor()
             self._fill_color = None
             self.update()
+    
+    def _update_geometry(self) -> None:
+        """Update the widget geometry to match the image view."""
+        if self._image_view is not None and self.parent() is not None:
+            # Use parent's size to ensure we cover the full area
+            parent_size = self.parent().size()
+            self.setGeometry(0, 0, parent_size.width(), parent_size.height())
+        elif self._image_view is not None:
+            # Fallback to image view size if no parent
+            view_size = self._image_view.size()
+            self.setGeometry(0, 0, view_size.width(), view_size.height())
     
     def set_fill_color(self, color: QColor) -> None:
         """Set the color to use for flood filling."""
@@ -81,8 +94,9 @@ class FloodFillView(QWidget):
         self._mouse_pos = event.pos()
         self._forward_event_to_image_view(event)
         
-        # Check if mouse is within image bounds
-        if self._is_mouse_within_image_bounds(event.pos()):
+        # Always show cursor when active (within widget bounds)
+        # The bounds check is only used to determine if operations are allowed
+        if self._active:
             self._show_cursor = True
         else:
             self._show_cursor = False
@@ -103,7 +117,11 @@ class FloodFillView(QWidget):
     
     def paintEvent(self, event) -> None:
         """Paint the flood fill preview."""
-        if not self._active or self._fill_color is None or not self._show_cursor:
+        if not self._active or self._fill_color is None:
+            return
+        
+        # Only show cursor preview if mouse is within widget bounds
+        if not self._show_cursor:
             return
         
         painter = QPainter(self)
@@ -184,5 +202,9 @@ class FloodFillView(QWidget):
     def resizeEvent(self, event) -> None:
         """Handle resize events."""
         super().resizeEvent(event)
-        if self._image_view is not None:
-            self.setGeometry(0, 0, self._image_view.width(), self._image_view.height())
+        self._update_geometry()
+    
+    def showEvent(self, event) -> None:
+        """Handle show events - update geometry when shown."""
+        super().showEvent(event)
+        self._update_geometry()

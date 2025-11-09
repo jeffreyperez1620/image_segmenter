@@ -5,9 +5,10 @@ import numpy as np
 from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QColor, QPixmap, QPainter, QPen
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QPushButton, 
+    QSizePolicy, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QPushButton, 
     QGroupBox, QFormLayout, QCheckBox, QSpinBox, QComboBox, QScrollArea,
-    QGridLayout, QFrame, QMessageBox, QColorDialog, QTableWidget, QTableWidgetItem, QHeaderView
+    QGridLayout, QFrame, QMessageBox, QColorDialog, QTableWidget, QTableWidgetItem, QHeaderView,
+    QApplication
 )
 
 from model import AppState
@@ -66,8 +67,6 @@ class ColorProcessingPanel(BaseStep):
         # Create the eyedropper view
         self._eyedropper_view = EyedropperView(self._image_view, self._app_state, self._image_view)
         
-        # Set maximum height to prevent the panel from being too tall
-        self.setMaximumHeight(600)
         self._init_ui()
     
     def _init_ui(self) -> None:
@@ -114,6 +113,7 @@ class ColorProcessingPanel(BaseStep):
         
         # Custom Palette Section
         palette_group = QGroupBox("Custom Palette")
+        palette_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         palette_layout = QVBoxLayout(palette_group)
         
         # Palette instructions
@@ -144,8 +144,8 @@ class ColorProcessingPanel(BaseStep):
         
         # Create a scrollable area for the palette table
         self.palette_scroll = QScrollArea()
-        self.palette_scroll.setFixedHeight(200)  # Force a fixed height of 200px
         self.palette_scroll.setWidgetResizable(True)
+        self.palette_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         
         self.palette_table = QTableWidget()
         self.palette_table.setColumnCount(2)
@@ -154,7 +154,6 @@ class ColorProcessingPanel(BaseStep):
         self.palette_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.palette_table.setColumnWidth(0, 50)  # Fixed width for color swatch
         self.palette_table.setAlternatingRowColors(True)
-        self.palette_table.setFixedHeight(200)  # Force table to be exactly 200px tall
         
         # Set custom styling for alternating rows and selection
         self.palette_table.setStyleSheet("""
@@ -209,9 +208,6 @@ class ColorProcessingPanel(BaseStep):
         algorithm_actions.addWidget(self.btn_preview_all)
         color_form.addRow("", algorithm_actions)
         
-        
-        layout.addStretch(1)
-        
         # Set the main widget
         self.set_main_widget(main_widget)
 
@@ -239,13 +235,22 @@ class ColorProcessingPanel(BaseStep):
         num_colors = self.get_num_colors()
         algorithm = self.get_algorithm()
         algorithm_name = self._get_algorithm_name(algorithm)
-        self.statusBarMessage.emit(f"Processing colors with {algorithm_name}...")
-        simplified_rgba, palette = simplify_colors_adaptive(source_rgba, num_colors, algorithm)
-        self.set_working_image(simplified_rgba.copy())
-        stats = get_color_statistics(simplified_rgba)
-        stats['palette'] = palette
-        self.update_statistics(stats)
-        self.statusBarMessage.emit(f"Color processing complete using {algorithm_name}. Reduced to {num_colors} colors.")
+        
+        # Set wait cursor and show status
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            self.statusBarMessage.emit(f"Processing colors with {algorithm_name}...")
+            QApplication.processEvents()  # Ensure status message is displayed
+            
+            simplified_rgba, palette = simplify_colors_adaptive(source_rgba, num_colors, algorithm)
+            self.set_working_image(simplified_rgba.copy())
+            stats = get_color_statistics(simplified_rgba)
+            stats['palette'] = palette
+            self.update_statistics(stats)
+            self.statusBarMessage.emit(f"Color processing complete using {algorithm_name}. Reduced to {num_colors} colors.")
+        finally:
+            # Restore cursor
+            QApplication.restoreOverrideCursor()
 
     def _on_preview_all(self) -> None:
         """Handle preview all outputs request."""
@@ -280,35 +285,43 @@ class ColorProcessingPanel(BaseStep):
         if base_image is None:
             return
         source_rgba = base_image.copy()
-        self.statusBarMessage.emit("Processing colors with custom palette...")
-		
-		# Get parameters from the color processing panel
+        
+        # Get parameters from the color processing panel
         custom_palette = self.get_palette()
         distance_metric = self.get_distance_metric()
         
-        # Perform custom palette simplification
-        from processing.color_simplify import simplify_colors_custom_palette
-        simplified_rgba, palette = simplify_colors_custom_palette(
-            source_rgba, 
-            custom_palette, 
-            distance_metric
-        )
-        
-        # Store the simplified output
-        self.set_working_image(simplified_rgba.copy())
-        
-        # Update statistics with palette information
-        stats = get_color_statistics(simplified_rgba)
-        stats['palette'] = palette
-        self.update_statistics(stats)
-        
-        metric_name = {
-            "lab": "LAB (Perceptual)",
-            "rgb": "RGB (Euclidean)",
-            "hsv": "HSV"
-        }.get(distance_metric, distance_metric)
-        
-        self.statusBarMessage.emit(f"Custom palette processing complete using {metric_name}. Applied {len(palette)} colors.")
+        # Set wait cursor and show status
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            self.statusBarMessage.emit("Processing colors with custom palette...")
+            QApplication.processEvents()  # Ensure status message is displayed
+            
+            # Perform custom palette simplification
+            from processing.color_simplify import simplify_colors_custom_palette
+            simplified_rgba, palette = simplify_colors_custom_palette(
+                source_rgba, 
+                custom_palette, 
+                distance_metric
+            )
+            
+            # Store the simplified output
+            self.set_working_image(simplified_rgba.copy())
+            
+            # Update statistics with palette information
+            stats = get_color_statistics(simplified_rgba)
+            stats['palette'] = palette
+            self.update_statistics(stats)
+            
+            metric_name = {
+                "lab": "LAB (Perceptual)",
+                "rgb": "RGB (Euclidean)",
+                "hsv": "HSV"
+            }.get(distance_metric, distance_metric)
+            
+            self.statusBarMessage.emit(f"Custom palette processing complete using {metric_name}. Applied {len(palette)} colors.")
+        finally:
+            # Restore cursor
+            QApplication.restoreOverrideCursor()
     
     def _add_color(self) -> None:
         """Add a new color to the palette."""
@@ -320,7 +333,7 @@ class ColorProcessingPanel(BaseStep):
         """Add a color to the internal list."""
         self._colors.append(color)
         self._update_stats()
-        self._update_buttons()    
+        self._update_buttons()
     
     def _clear_palette(self) -> None:
         """Clear all colors from the palette."""
