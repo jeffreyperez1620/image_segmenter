@@ -119,7 +119,6 @@ class MainWindow(QMainWindow):
 		# Set maximum height to prevent the dock from being too tall
 		self.addDockWidget(Qt.LeftDockWidgetArea, self._dock_tools)
 		
-		
 		# Connect tab changes to update workflow guidance
 		self._tab_widget.currentChanged.connect(self._on_tab_changed)
 		# Set up validation callback for tab changes
@@ -127,6 +126,12 @@ class MainWindow(QMainWindow):
 
 	def _validate_tab_change(self, current_index: int, new_index: int) -> bool:
 		"""Validate tab change and return True if allowed, False if cancelled."""
+		
+		# Check if the target tab can be entered
+		targetTab = self._tab_widget.widget(new_index)
+		if targetTab is not None and isinstance(targetTab, BaseStep):
+			if not targetTab.validate_entry():
+				return False  # Prevent the tab change
 		
 		# Check for unapplied changes when trying to switch tabs
 		currentTab = self._tab_widget.widget(current_index)
@@ -139,10 +144,10 @@ class MainWindow(QMainWindow):
 				# User chose to discard changes, reset working image to base
 				self._app_state.reset_working_image()
 			elif choice == "apply":
-				# User chose to apply changes, update base image
+			# User chose to apply changes, update base image
 				self._app_state.apply_working_to_base()
 			currentTab.mark_changes_applied()
-		
+	
 		return True  # Allow the tab change
 
 	def _show_unapplied_changes_dialog(self) -> str:
@@ -221,89 +226,12 @@ class MainWindow(QMainWindow):
 			
 			A tool to simplify images, segment by color, arrange segments for minimal layout, and export SVG for laser engraving.
 			""".strip(),
-		)	
+		)
 
 	def _on_status_bar_message(self, message: str) -> None:
 		"""Handle status bar message."""
 		self.statusBar().showMessage(message, 3000)
 
-	def _on_tendril_cleanup(self) -> None:
-		"""Handle tendril cleanup request."""
-		# Check if we have a processed image available
-		if self._simplified_output is None and not self._color_processing_applied:
-			QMessageBox.warning(self, "Smoothing", "No processed image available. Complete color processing first.")
-			return
-		
-		# Use the appropriate input image (same priority as _get_current_working_image)
-		if self._cleaned_output is not None:
-			# Use the cleaned output (smoothed) if available
-			input_image = self._cleaned_output
-		elif self._simplified_output is not None:
-			# Use the simplified output (color processed) if available
-			input_image = self._simplified_output
-		else:
-			# Fallback to working image
-			working_image = BaseStep.get_shared_working_image()
-			input_image = working_image
-		
-		if input_image is None:
-			QMessageBox.warning(self, "Smoothing", "No image available for processing.")
-			return
-		
-		# Get parameters from the panel
-		threshold = self._region_cleanup_panel.get_tendril_threshold()
-		max_iterations = self._region_cleanup_panel.get_tendril_max_iterations()
-		
-		# Show progress dialog
-		self._progress_dialog = ProgressDialog("Smoothing", self)
-		self._progress_dialog.show()
-		
-		# Create and start worker thread
-		from ui.tendril_worker import TendrilWorker
-		self._tendril_worker = TendrilWorker(input_image, threshold, max_iterations)
-		self._tendril_worker.progress_updated.connect(self._on_tendril_progress_updated)
-		self._tendril_worker.cleanup_completed.connect(self._on_tendril_cleanup_completed)
-		self._tendril_worker.cleanup_failed.connect(self._on_tendril_cleanup_failed)
-		self._tendril_worker.start()
-	
-	def _on_tendril_progress_updated(self, current: int, total: int, message: str) -> None:
-		"""Handle tendril cleanup progress updates."""
-		if hasattr(self, '_progress_dialog') and self._progress_dialog:
-			self._progress_dialog.update_progress(current, total, message)
-	
-	def _on_tendril_cleanup_completed(self, cleaned_output: np.ndarray, iterations_used: int, status_message: str) -> None:
-		"""Handle successful tendril cleanup completion."""
-		# Close progress dialog
-		if hasattr(self, '_progress_dialog') and self._progress_dialog:
-			self._progress_dialog.close()
-			self._progress_dialog = None
-		
-		# Update the cleaned output
-		self._cleaned_output = cleaned_output
-		
-		# Convert to QImage for preview
-		from utils.qt_image import numpy_rgba_to_qimage
-		qimg = numpy_rgba_to_qimage(cleaned_output)
-		
-		# Set as preview
-		self._image_view.set_preview_image(qimg)
-		self._image_view.set_preview_enabled(True)
-		
-		# Update region boundaries if overlay is enabled
-		if self._region_cleanup_panel.get_show_region_overlay():
-			boundaries_data = self._generate_region_boundaries(cleaned_output)
-			self._image_view.set_region_boundaries_data(boundaries_data)
-		
-		self.statusBar().showMessage(f"Smoothing completed in {iterations_used} iterations. Use 'Apply Cleanup' to make changes permanent.", 5000)
-	
-	def _on_tendril_cleanup_failed(self, error_message: str) -> None:
-		"""Handle tendril cleanup failure."""
-		# Close progress dialog
-		if hasattr(self, '_progress_dialog') and self._progress_dialog:
-			self._progress_dialog.close()
-			self._progress_dialog = None
-		
-		QMessageBox.critical(self, "Smoothing Error", f"An error occurred during smoothing:\n{error_message}")
 	
 	def _on_save_working_image(self) -> None:
 		"""Handle save working image request."""
@@ -311,27 +239,17 @@ class MainWindow(QMainWindow):
 		image_to_save = None
 		
 		# Priority order: cleaned output > simplified output > original AI output
-		if self._cleaned_output is not None:
-			image_to_save = self._cleaned_output
-			image_type = "cleaned"
-		elif self._simplified_output is not None:
-			image_to_save = self._simplified_output
-			image_type = "simplified"
-		else:
-			working_image = BaseStep.get_shared_working_image()
-			if working_image is not None:
-				image_to_save = working_image
-				image_type = "ai_processed"
-			else:
-				QMessageBox.warning(self, "Save Working Image", "No processed image available to save.")
-				return
+		image_to_save = self._app_state.working_image
+		if image_to_save is None:
+			QMessageBox.warning(self, "Save Working Image", "No image available to save.")
+			return
 		
 		# Show save dialog
 		from PySide6.QtWidgets import QFileDialog
 		file_path, _ = QFileDialog.getSaveFileName(
 			self,
 			"Save Working Image",
-			f"working_image_{image_type}.tiff",
+			f"working_image.tiff",
 			"TIFF Files (*.tiff *.tif);;PNG Files (*.png);;BMP Files (*.bmp);;All Files (*)"
 		)
 		

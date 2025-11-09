@@ -87,44 +87,13 @@ class RegionCleanupPanel(BaseStep):
         threshold_group = QGroupBox("Region Size Threshold")
         threshold_layout = QFormLayout(threshold_group)
         
-        # Minimum region size slider
-        self.size_slider = QSlider(Qt.Horizontal)
-        self.size_slider.setMinimum(10)
-        self.size_slider.setMaximum(1000)
-        self.size_slider.setValue(100)
-        self.size_slider.setTickPosition(QSlider.TicksBelow)
-        self.size_slider.setTickInterval(100)
-        self.size_slider.valueChanged.connect(self._on_size_threshold_changed)
-        threshold_layout.addRow("Minimum Region Size (pixels)", self.size_slider)
-        
-        self.size_label = QLabel("100 pixels")
-        threshold_layout.addRow("Current threshold:", self.size_label)
-        
-        # Auto-merge threshold (moved here)
-        self.auto_merge_threshold_slider = QSlider(Qt.Horizontal)
-        self.auto_merge_threshold_slider.setMinimum(0)
-        self.auto_merge_threshold_slider.setMaximum(100)
-        self.auto_merge_threshold_slider.setValue(0)  # Default to 0%
-        self.auto_merge_threshold_slider.setTickPosition(QSlider.TicksBelow)
-        self.auto_merge_threshold_slider.setTickInterval(10)
-        self.auto_merge_threshold_slider.setToolTip("Confidence threshold for automatic merging (0-100%). 0% is completely automatic, 100% is completely manual.")
-        threshold_layout.addRow("Auto-merge Threshold (%)", self.auto_merge_threshold_slider)
-        
-        self.auto_merge_label = QLabel("0%")
-        threshold_layout.addRow("Current threshold:", self.auto_merge_label)
-        self.auto_merge_threshold_slider.valueChanged.connect(self._on_auto_merge_threshold_changed)
-        
-        # Note about auto-merge threshold
-        auto_merge_note = QLabel("Note: 0% is completely automatic, 100% is completely manual")
-        auto_merge_note.setStyleSheet("color: gray; font-size: 11px;")
-        threshold_layout.addRow("", auto_merge_note)
-        
-        # Adjacency method (moved here)
-        self.connectivity_combo = QComboBox()
-        self.connectivity_combo.addItems(["8-way (diagonal)", "4-way (horizontal/vertical only)"])
-        self.connectivity_combo.setCurrentIndex(0)  # Default to 8-way
-        self.connectivity_combo.setToolTip("8-way: regions connected by diagonal pixels are merged. 4-way: only horizontal/vertical connections.")
-        threshold_layout.addRow("Adjacency Method:", self.connectivity_combo)
+        # Minimum region size input field
+        self.size_input = QSpinBox()
+        self.size_input.setMinimum(10)
+        self.size_input.setMaximum(1000)
+        self.size_input.setValue(100)
+        self.size_input.setSuffix(" pixels")
+        threshold_layout.addRow("Minimum Region Size", self.size_input)
         
         # Merge regions button (moved here)
         self.cleanup_button = QPushButton("Merge Regions")
@@ -144,53 +113,49 @@ class RegionCleanupPanel(BaseStep):
         
         layout.addWidget(stats_group)
         
-        # Visualization options
-        viz_group = QGroupBox("Visualization")
-        viz_layout = QFormLayout(viz_group)
-        
-        layout.addWidget(viz_group)
-        
         # Smoothing Section (renamed from Tendril Cleanup)
         smoothing_group = QGroupBox("Smoothing")
         smoothing_layout = QFormLayout()
         
-        # Smoothing strength slider (renamed from Tendril Thickness Threshold)
+        # Smoothing strength slider with label
         self.tendril_threshold_slider = QSlider(Qt.Horizontal)
         self.tendril_threshold_slider.setRange(1, 10)
         self.tendril_threshold_slider.setValue(2)  # Default to 2
         self.tendril_threshold_slider.setTickPosition(QSlider.TicksBelow)
         self.tendril_threshold_slider.setTickInterval(1)
-        self.tendril_threshold_slider.valueChanged.connect(self._on_tendril_threshold_changed)
-        smoothing_layout.addRow("Strength", self.tendril_threshold_slider)
+        self.tendril_threshold_slider.setToolTip("Strength: 1-10 pixels")
         
-        self.tendril_threshold_label = QLabel("2 pixels")
-        smoothing_layout.addRow("Current setting:", self.tendril_threshold_label)
+        self.tendril_threshold_label = QLabel("2")
+        self.tendril_threshold_label.setMinimumWidth(30)
+        self.tendril_threshold_label.setAlignment(Qt.AlignCenter)
         
-        # Max iterations slider
+        strength_layout = QHBoxLayout()
+        strength_layout.addWidget(self.tendril_threshold_slider)
+        strength_layout.addWidget(self.tendril_threshold_label)
+        
+        smoothing_layout.addRow("Strength (pixels)", strength_layout)
+        
+        # Max iterations slider with label
         self.tendril_iterations_slider = QSlider(Qt.Horizontal)
-        self.tendril_iterations_slider.setRange(5, 50)
-        self.tendril_iterations_slider.setValue(30)
+        self.tendril_iterations_slider.setRange(5, 100)
+        self.tendril_iterations_slider.setValue(20)
         self.tendril_iterations_slider.setTickPosition(QSlider.TicksBelow)
-        self.tendril_iterations_slider.setTickInterval(5)
-        self.tendril_iterations_slider.valueChanged.connect(self._on_tendril_iterations_changed)
-        smoothing_layout.addRow("Max Iterations", self.tendril_iterations_slider)
+        self.tendril_iterations_slider.setTickInterval(10)
+        self.tendril_iterations_slider.setToolTip("Max Iterations: 5-100")
         
-        self.tendril_iterations_label = QLabel("30 iterations")
-        smoothing_layout.addRow("Current setting:", self.tendril_iterations_label)
+        self.tendril_iterations_label = QLabel("20")
+        self.tendril_iterations_label.setMinimumWidth(30)
+        self.tendril_iterations_label.setAlignment(Qt.AlignCenter)
+        
+        iterations_layout = QHBoxLayout()
+        iterations_layout.addWidget(self.tendril_iterations_slider)
+        iterations_layout.addWidget(self.tendril_iterations_label)
+        
+        smoothing_layout.addRow("Max Iterations", iterations_layout)
         
         # Smoothing button
         self.tendril_cleanup_button = QPushButton("Apply Smoothing")
-        self.tendril_cleanup_button.clicked.connect(self._on_tendril_cleanup_button_clicked)
         smoothing_layout.addRow("", self.tendril_cleanup_button)
-        
-        # Instructions (updated text)
-        smoothing_instructions = QLabel(
-            "Remove thin tendrils (pixels with thickness ≤ strength) that are too thin for laser engraving. "
-            "The algorithm will iterate until no more tendrils are found or max iterations is reached."
-        )
-        smoothing_instructions.setWordWrap(True)
-        smoothing_instructions.setStyleSheet("color: gray; font-size: 11px;")
-        smoothing_layout.addRow("", smoothing_instructions)
         
         smoothing_group.setLayout(smoothing_layout)
         layout.addWidget(smoothing_group)
@@ -199,26 +164,9 @@ class RegionCleanupPanel(BaseStep):
         scroll_area.setWidget(main_widget)
         self.set_main_widget(scroll_area)
     
-    def _on_size_threshold_changed(self, value: int) -> None:
-        """Handle size threshold slider change."""
-        self._min_region_size = value
-        self.size_label.setText(f"{value} pixels")
-    
-    def _on_auto_merge_threshold_changed(self, value: int) -> None:
-        """Handle auto-merge threshold slider change."""
-        self.auto_merge_label.setText(f"{value}%")
-    
     def get_min_region_size(self) -> int:
         """Get the minimum region size threshold."""
-        return self._min_region_size
-    
-    def get_auto_merge_threshold(self) -> float:
-        """Get the auto-merge threshold as a float between 0 and 1."""
-        return self.auto_merge_threshold_slider.value() / 100.0
-    
-    def get_connectivity(self) -> int:
-        """Get the connectivity setting (4 or 8)."""
-        return 4 if self.connectivity_combo.currentIndex() == 1 else 8
+        return self.size_input.value()
     
     def update_region_statistics(self, stats: Dict) -> None:
         """Update the region statistics display."""
@@ -372,8 +320,8 @@ class RegionCleanupPanel(BaseStep):
         
         # Get parameters from the panel
         min_size = self.get_min_region_size()
-        auto_merge_threshold = self.get_auto_merge_threshold()
-        connectivity = self.get_connectivity()
+        auto_merge_threshold = 0; # Default 0, self.get_auto_merge_threshold()
+        connectivity = 8; # Default 8, self.get_connectivity()
         
         # Show progress dialog
         from ui.progress_dialog import ProgressDialog
@@ -417,6 +365,102 @@ class RegionCleanupPanel(BaseStep):
 
     def _on_tendril_cleanup_button_clicked(self) -> None:
         """Handle tendril cleanup button click."""
+        # Check if a worker is already running
+        if hasattr(self, '_tendril_worker') and self._tendril_worker and self._tendril_worker.isRunning():
+            QMessageBox.warning(self, "Smoothing", "A smoothing operation is already in progress.")
+            return
+        
+        # Check if we have a processed image available
+        working_image = self._app_state.working_image
+        if working_image is None:
+            QMessageBox.warning(self, "Smoothing", "No image available for processing.")
+            return
+        
+        # Get parameters from the panel
+        threshold = self.get_tendril_threshold()
+        max_iterations = self.get_tendril_max_iterations()
+        
+        # Show progress dialog
+        from ui.progress_dialog import ProgressDialog
+        progress_dialog = ProgressDialog("Smoothing", self)
+        progress_dialog.show()
+        
+        try:
+            # Create and start worker thread
+            from ui.tendril_worker import TendrilWorker
+            self._tendril_worker = TendrilWorker(working_image, threshold, max_iterations)
+            
+            # Store progress dialog as instance variable to avoid scope issues
+            self._progress_dialog = progress_dialog
+            
+            # Connect signals
+            self._tendril_worker.progress_updated.connect(progress_dialog.update_progress)
+            self._tendril_worker.cleanup_completed.connect(self._on_tendril_cleanup_completed)
+            self._tendril_worker.cleanup_failed.connect(self._on_tendril_cleanup_failed)
+            
+            # Only start if not already running
+            if not self._tendril_worker.isRunning():
+                self._tendril_worker.start()
+            
+        except Exception as e:
+            progress_dialog.close()
+            QMessageBox.critical(self, "Smoothing Error", f"Failed to start smoothing process:\n{str(e)}")
+    
+    def _on_tendril_cleanup_completed(self, cleaned_output: np.ndarray, iterations_used: int, status_message: str) -> None:
+        """Handle successful tendril cleanup completion."""
+        try:
+            # Close progress dialog safely
+            if hasattr(self, '_progress_dialog') and self._progress_dialog:
+                try:
+                    self._progress_dialog.close()
+                except Exception:
+                    pass  # Ignore any errors closing the dialog
+            
+            # Disconnect signals to prevent memory leaks
+            if hasattr(self, '_tendril_worker') and self._tendril_worker:
+                self._tendril_worker.progress_updated.disconnect()
+                self._tendril_worker.cleanup_completed.disconnect()
+                self._tendril_worker.cleanup_failed.disconnect()
+                
+                # Wait for thread to finish before cleanup
+                if self._tendril_worker.isRunning():
+                    self._tendril_worker.wait(2000)  # Wait up to 2 seconds
+                    if self._tendril_worker.isRunning():
+                        self._tendril_worker.terminate()
+                        self._tendril_worker.wait(1000)  # Wait for termination
+                
+                self._tendril_worker = None
+            
+            # Update the working image with the cleaned result
+            self.set_working_image(cleaned_output)
+            
+            # Show success message
+            self.statusBarMessage.emit(f"Smoothing completed after {iterations_used} iterations")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Smoothing Error", f"An error occurred during completion:\n{str(e)}")
+    
+    def _on_tendril_cleanup_failed(self, error_message: str) -> None:
+        """Handle tendril cleanup failure."""
+        try:
+            # Close progress dialog safely
+            if hasattr(self, '_progress_dialog') and self._progress_dialog:
+                try:
+                    self._progress_dialog.close()
+                except Exception:
+                    pass  # Ignore any errors closing the dialog
+            
+            # Disconnect signals to prevent memory leaks
+            if hasattr(self, '_tendril_worker') and self._tendril_worker:
+                self._tendril_worker.progress_updated.disconnect()
+                self._tendril_worker.cleanup_completed.disconnect()
+                self._tendril_worker.cleanup_failed.disconnect()
+                # Don't set to None immediately - let Qt handle cleanup
+            
+            QMessageBox.critical(self, "Smoothing Error", f"An error occurred during smoothing:\n{error_message}")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Smoothing Error", f"An error occurred during failure handling:\n{str(e)}")
     
     def _on_save_requested(self) -> None:
         """Handle save button click."""
@@ -424,11 +468,11 @@ class RegionCleanupPanel(BaseStep):
     
     def _on_tendril_threshold_changed(self, value: int) -> None:
         """Handle smoothing strength slider change."""
-        self.tendril_threshold_label.setText(f"{value} pixels")
+        self.tendril_threshold_label.setText(f"{value}")
     
     def _on_tendril_iterations_changed(self, value: int) -> None:
         """Handle tendril iterations slider change."""
-        self.tendril_iterations_label.setText(f"{value} iterations")
+        self.tendril_iterations_label.setText(f"{value}")
     
     def get_tendril_threshold(self) -> int:
         """Get the tendril thickness threshold."""
@@ -438,21 +482,70 @@ class RegionCleanupPanel(BaseStep):
         """Get the maximum number of tendril cleanup iterations."""
         return self.tendril_iterations_slider.value()
 
+    def validate_entry(self) -> bool:
+        """Validate the entry of the step."""
+        # Check if there is a working image
+        working_image = self._app_state.working_image
+        if working_image is None:
+            QMessageBox.warning(
+                self, 
+                "Region Cleanup Validation", 
+                "No working image available.\n\nPlease load an image and process it through the previous steps before using Region Cleanup."
+            )
+            return False
+        
+        # Check if the number of colors in the palette is no more than 32
+        try:
+            unique_colors = self._extract_unique_colors(working_image)
+            num_colors = len(unique_colors)
+            
+            if num_colors > 32:
+                QMessageBox.warning(
+                    self,
+                    "Region Cleanup Validation",
+                    f"Image has too many colors ({num_colors}).\n\nRegion Cleanup works best with images that have 32 or fewer colors.\n\nPlease use the Color Processing step to reduce the number of colors first."
+                )
+                return False
+            
+            return True
+            
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Region Cleanup Validation",
+                f"Error analyzing image: {str(e)}\n\nPlease ensure the image is properly loaded and try again."
+            )
+            return False
+
     def _on_open(self) -> None:
         """Handle open event."""
         super()._on_open()
+        self.tendril_threshold_slider.valueChanged.connect(self._on_tendril_threshold_changed)
+        self.tendril_iterations_slider.valueChanged.connect(self._on_tendril_iterations_changed)
         self.flood_fill_button.clicked.connect(self._on_flood_fill_button_clicked)
         self.flood_fill_enabled.toggled.connect(self._on_flood_fill_enabled_toggled)
         self._flood_fill_view.flood_fill_requested.connect(self._on_flood_fill_requested)
         self.cleanup_button.clicked.connect(self._on_region_cleanup_button_clicked)
+        self.tendril_cleanup_button.clicked.connect(self._on_tendril_cleanup_button_clicked)
 
     def _on_close(self) -> None:
         """Handle close event."""
         super()._on_close()
+        self.tendril_threshold_slider.valueChanged.disconnect(self._on_tendril_threshold_changed)
+        self.tendril_iterations_slider.valueChanged.disconnect(self._on_tendril_iterations_changed)
         self.flood_fill_button.clicked.disconnect(self._on_flood_fill_button_clicked)
         self.flood_fill_enabled.toggled.disconnect(self._on_flood_fill_enabled_toggled)
         self._flood_fill_view.flood_fill_requested.disconnect(self._on_flood_fill_requested)
         self.cleanup_button.clicked.disconnect(self._on_region_cleanup_button_clicked)
+        self.tendril_cleanup_button.clicked.disconnect(self._on_tendril_cleanup_button_clicked)
+        
+        # Clean up any running tendril worker
+        if hasattr(self, '_tendril_worker') and self._tendril_worker:
+            self._tendril_worker.progress_updated.disconnect()
+            self._tendril_worker.cleanup_completed.disconnect()
+            self._tendril_worker.cleanup_failed.disconnect()
+            self._tendril_worker = None
+        
         # Disable flood fill mode when closing
         self.flood_fill_enabled.setChecked(False)
         self._flood_fill_view.set_active(False)

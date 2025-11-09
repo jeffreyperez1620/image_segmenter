@@ -131,6 +131,10 @@ class BaseStep(QWidget):
     def has_unapplied_changes(self) -> bool:
         """Check if there are unapplied changes."""
         return self._has_unapplied_changes
+
+    def validate_entry(self) -> bool:
+        """Validate the entry of the step."""
+        return True
     
     def _update_controls_state(self):
         """Update the state of common controls."""

@@ -73,6 +73,7 @@ def analyze_regions(rgba: np.ndarray, min_size_threshold: int = 100, connectivit
                     'color_mask': color_mask,
                     'labels': labels,
                     'component_id': i,
+                    'centroid': (float(centroids[i][0]), float(centroids[i][1])),  # (x, y)
                     'bbox': (
                         stats[i, cv.CC_STAT_LEFT],
                         stats[i, cv.CC_STAT_TOP], 
@@ -222,15 +223,17 @@ def calculate_merge_score(
     neighbor_color: Tuple[int, int, int], 
     neighbor_region_size: int,
     image_context: dict,
-    weights: dict = None
+    weights: dict = None,
+    neighbor_centroid: Optional[Tuple[float, float]] = None
 ) -> float:
     """
     Calculate a score for merging a small region into a neighbor color.
+    Optimized with spatial proximity calculation.
     
     Parameters
     ----------
     small_region: dict
-        Information about the small region
+        Information about the small region (must include 'centroid' for spatial calculation)
     neighbor_color: Tuple[int, int, int]
         RGB color of the potential merge target
     neighbor_region_size: int
@@ -239,6 +242,8 @@ def calculate_merge_score(
         Context information about the image
     weights: dict, optional
         Weights for different factors
+    neighbor_centroid: Optional[Tuple[float, float]]
+        Centroid of the neighbor region for spatial calculation
         
     Returns
     -------
@@ -257,8 +262,21 @@ def calculate_merge_score(
     color_sim = 1.0 - color_distance(small_region['color'], neighbor_color)
     
     # Factor 2: Spatial proximity (0-1, higher is closer)
-    # For now, use a simple approximation - could be improved with actual centroids
-    spatial_prox = 0.5  # Placeholder - would need centroid calculation
+    if neighbor_centroid is not None and 'centroid' in small_region:
+        # Calculate distance between centroids
+        small_centroid = small_region['centroid']
+        dx = small_centroid[0] - neighbor_centroid[0]
+        dy = small_centroid[1] - neighbor_centroid[1]
+        distance = np.sqrt(dx*dx + dy*dy)
+        
+        # Normalize by image diagonal (max possible distance)
+        max_distance = image_context.get('max_distance', 1.0)
+        if max_distance > 0:
+            spatial_prox = 1.0 - min(1.0, distance / max_distance)
+        else:
+            spatial_prox = 0.5
+    else:
+        spatial_prox = 0.5  # Fallback if centroids not available
     
     # Factor 3: Frequency (0-1, higher is more common)
     total_pixels = image_context.get('total_pixels', 1)
@@ -267,7 +285,7 @@ def calculate_merge_score(
     
     # Factor 4: Region size (prefer larger neighbors)
     max_region_size = image_context.get('max_region_size', 1)
-    size_factor = min(1.0, neighbor_region_size / max_region_size)
+    size_factor = min(1.0, neighbor_region_size / max_region_size) if max_region_size > 0 else 0.0
     
     # Weighted combination
     score = (weights['color'] * color_sim + 
@@ -278,35 +296,39 @@ def calculate_merge_score(
     return score
 
 
+# Pre-computed LAB color cache for faster distance calculations
+_lab_color_cache: Dict[Tuple[int, int, int], Tuple[float, float, float]] = {}
+_max_lab_distance = 255.0 * np.sqrt(3)  # Maximum possible distance in LAB space
+
+def _rgb_to_lab_cached(rgb: Tuple[int, int, int]) -> Tuple[float, float, float]:
+    """Convert RGB to LAB with caching."""
+    if rgb not in _lab_color_cache:
+        import cv2 as cv
+        img = np.array([[rgb]], dtype=np.uint8)
+        lab = cv.cvtColor(img, cv.COLOR_RGB2LAB)
+        _lab_color_cache[rgb] = tuple(lab[0, 0].astype(np.float64))
+    return _lab_color_cache[rgb]
+
 def color_distance(color1: Tuple[int, int, int], color2: Tuple[int, int, int]) -> float:
     """
     Calculate perceptual color distance between two RGB colors.
     Returns a value between 0 and 1, where 0 is identical and 1 is maximally different.
+    Optimized with LAB color space caching.
     """
-    # Convert to LAB color space for better perceptual distance
-    import cv2 as cv
+    if color1 == color2:
+        return 0.0
     
-    # Create small images for color conversion
-    img1 = np.array([[color1]], dtype=np.uint8)
-    img2 = np.array([[color2]], dtype=np.uint8)
+    # Use cached LAB conversions
+    l1, a1, b1 = _rgb_to_lab_cached(color1)
+    l2, a2, b2 = _rgb_to_lab_cached(color2)
     
-    # Convert RGB to LAB
-    lab1 = cv.cvtColor(img1, cv.COLOR_RGB2LAB)
-    lab2 = cv.cvtColor(img2, cv.COLOR_RGB2LAB)
-    
-    # Calculate Euclidean distance in LAB space using float64 to avoid overflow
-    l1, a1, b1 = lab1[0, 0].astype(np.float64)
-    l2, a2, b2 = lab2[0, 0].astype(np.float64)
-    
-    # Calculate distance with proper bounds
+    # Calculate Euclidean distance in LAB space
     l_diff = l1 - l2
     a_diff = a1 - a2
     b_diff = b1 - b2
     
-    # Normalize to 0-1 range (LAB values are roughly 0-255)
-    # Use a more conservative normalization to avoid overflow
-    max_lab_distance = 255.0 * np.sqrt(3)  # Maximum possible distance in LAB space
-    distance = np.sqrt(l_diff**2 + a_diff**2 + b_diff**2) / max_lab_distance
+    # Normalize to 0-1 range
+    distance = np.sqrt(l_diff**2 + a_diff**2 + b_diff**2) / _max_lab_distance
     
     return min(1.0, max(0.0, distance))
 
@@ -347,6 +369,9 @@ def merge_small_regions(
     rgb = result[:, :, :3]
     alpha = result[:, :, 3]
     
+    # Clear LAB color cache at start to prevent memory buildup
+    _lab_color_cache.clear()
+    
     # Analyze regions with the minimum size threshold
     if progress_callback:
         progress_callback(0, 100, "Analyzing regions...")
@@ -357,12 +382,21 @@ def merge_small_regions(
     if progress_callback:
         progress_callback(10, 100, "Building image context...")
     
+    # Calculate image diagonal for spatial proximity normalization
+    h, w = rgba.shape[:2]
+    image_diagonal = np.sqrt(h*h + w*w)
+    
     # Initial image context (will be updated each pass)
     image_context = {
         'total_pixels': np.sum(alpha > 0),
         'max_region_size': 1,
+        'max_distance': image_diagonal,
         'color_counts': {}
     }
+    
+    # Cache for neighbor lookups and region sizes (keyed by color)
+    neighbor_cache: Dict[Tuple[int, int, int], Tuple[List[Tuple[int, int, int]], Dict[Tuple[int, int, int], Tuple[int, Tuple[float, float]]]]] = {}
+    # Structure: {color: (neighbor_colors_list, {neighbor_color: (size, centroid)})}
     
     # Perform multiple passes to ensure all small regions are handled
     max_passes = 20  # Increased to allow complete cleanup
@@ -374,7 +408,7 @@ def merge_small_regions(
     while pass_num < max_passes:
         pass_num += 1
         
-        # Re-analyze regions after each pass
+        # Re-analyze regions after each pass (necessary because merges change the image)
         if progress_callback:
             progress_callback(20 + (pass_num - 1) * 25, 100, f"Pass {pass_num}: Analyzing regions...")
         
@@ -385,12 +419,17 @@ def merge_small_regions(
         image_context['max_region_size'] = max([r['size'] for r in all_regions]) if all_regions else 1
         image_context['color_counts'] = {}
         
-        # Count pixels for each color
+        # Build color-to-region mapping for faster lookups
+        color_to_regions: Dict[Tuple[int, int, int], List[dict]] = {}
         for region in all_regions:
             color = region['color']
             if color not in image_context['color_counts']:
                 image_context['color_counts'][color] = 0
             image_context['color_counts'][color] += region['size']
+            
+            if color not in color_to_regions:
+                color_to_regions[color] = []
+            color_to_regions[color].append(region)
         
         # Find small regions (individual connected components)
         small_regions = [region for region in all_regions if region['size'] < min_size]
@@ -421,6 +460,9 @@ def merge_small_regions(
         user_decisions = 0
         total_regions = len(small_regions)
         
+        # Clear neighbor cache at start of each pass (regions may have changed)
+        neighbor_cache.clear()
+        
         for i, region in enumerate(small_regions):
             # Update progress
             if progress_callback:
@@ -428,7 +470,6 @@ def merge_small_regions(
                 progress_callback(progress, 100, f"Pass {pass_num}: Processing region {i+1}/{total_regions}...")
             
             target_color = region['color']
-            region_size = region['size']
             labels = region['labels']
             component_id = region['component_id']
         
@@ -438,25 +479,68 @@ def merge_small_regions(
             if not np.any(component_mask):
                 continue
             
-            # Find neighboring colors by looking at pixels adjacent to this component
-            neighbor_colors = find_neighboring_colors_for_component(result, component_mask, connectivity)
+            # Find neighboring colors (use cache if available)
+            if target_color in neighbor_cache:
+                neighbor_colors, neighbor_info = neighbor_cache[target_color]
+            else:
+                neighbor_colors = find_neighboring_colors_for_component(result, component_mask, connectivity)
+                
+                # Build neighbor info cache (size and centroid for each neighbor color)
+                neighbor_info: Dict[Tuple[int, int, int], Tuple[int, Tuple[float, float]]] = {}
+                for neighbor_color in neighbor_colors:
+                    if neighbor_color in color_to_regions:
+                        # Find largest region of this color for size and centroid
+                        neighbor_regions = color_to_regions[neighbor_color]
+                        largest_neighbor = max(neighbor_regions, key=lambda r: r['size'])
+                        neighbor_info[neighbor_color] = (largest_neighbor['size'], largest_neighbor['centroid'])
+                    else:
+                        # Fallback: calculate from mask
+                        neighbor_mask = np.all(rgb == neighbor_color, axis=2) & (alpha > 0)
+                        neighbor_size = np.sum(neighbor_mask)
+                        # Approximate centroid as center of bounding box
+                        if np.any(neighbor_mask):
+                            rows, cols = np.where(neighbor_mask)
+                            centroid = (float(np.mean(cols)), float(np.mean(rows)))
+                        else:
+                            centroid = (0.0, 0.0)
+                        neighbor_info[neighbor_color] = (neighbor_size, centroid)
+                
+                neighbor_cache[target_color] = (neighbor_colors, neighbor_info)
             
             if not neighbor_colors:
                 # If no neighbors found, try to find the most common color in the image
                 if image_context['color_counts']:
                     most_common_color = max(image_context['color_counts'].items(), key=lambda x: x[1])[0]
                     neighbor_colors = [most_common_color]
+                    # Build info for most common color
+                    if most_common_color in color_to_regions:
+                        neighbor_regions = color_to_regions[most_common_color]
+                        largest_neighbor = max(neighbor_regions, key=lambda r: r['size'])
+                        neighbor_info = {most_common_color: (largest_neighbor['size'], largest_neighbor['centroid'])}
+                    else:
+                        neighbor_mask = np.all(rgb == most_common_color, axis=2) & (alpha > 0)
+                        neighbor_size = np.sum(neighbor_mask)
+                        if np.any(neighbor_mask):
+                            rows, cols = np.where(neighbor_mask)
+                            centroid = (float(np.mean(cols)), float(np.mean(rows)))
+                        else:
+                            centroid = (0.0, 0.0)
+                        neighbor_info = {most_common_color: (neighbor_size, centroid)}
                 else:
                     continue
             
-            # Calculate scores for each neighbor
+            # Calculate scores for each neighbor (using cached info)
             neighbor_scores = []
             for neighbor_color in neighbor_colors:
-                # Get size of this neighbor region
-                neighbor_mask = np.all(rgb == neighbor_color, axis=2) & (alpha > 0)
-                neighbor_size = np.sum(neighbor_mask)
-                
-                score = calculate_merge_score(region, neighbor_color, neighbor_size, image_context, merge_weights)
+                neighbor_size, neighbor_centroid = neighbor_info.get(neighbor_color, (1, (0.0, 0.0)))
+                score = calculate_merge_score(
+                    region, 
+                    neighbor_color, 
+                    neighbor_size, 
+                    image_context, 
+                    merge_weights,
+                    neighbor_centroid
+                )
                 neighbor_scores.append((neighbor_color, score))
             
             # Sort by score (highest first)
