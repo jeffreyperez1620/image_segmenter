@@ -29,6 +29,7 @@ from ui.image_view import ImageView
 from ui.background_removal.bg_tools_panel import BgToolsPanel
 from ui.color_processing.color_processing_panel import ColorProcessingPanel
 from ui.region_cleanup.region_cleanup_panel import RegionCleanupPanel
+from ui.arrange_regions.arrange_regions_panel import ArrangeRegionsPanel
 from ui.progress_dialog import ProgressDialog
 from ui.validating_tab_widget import ValidatingTabWidget
 from ui.base_step import BaseStep
@@ -138,6 +139,10 @@ class MainWindow(QMainWindow):
 		self._region_cleanup_panel = RegionCleanupPanel(self, self._app_state, self._image_view)
 		self._tab_widget.addTab(self._region_cleanup_panel, "3. Region Cleanup")
 		
+		# Arrange regions tab
+		self._arrange_regions_panel = ArrangeRegionsPanel(self, self._app_state, self._image_view)
+		self._tab_widget.addTab(self._arrange_regions_panel, "4. Arrange Regions")
+		
 		# Create dock widget for the tabbed interface
 		self._dock_tools = QDockWidget("Workflow Tools", self)
 		self._dock_tools.setObjectName("DockTools")
@@ -225,6 +230,8 @@ class MainWindow(QMainWindow):
 				self.statusBar().showMessage("Step 2: Process colors using algorithms or create custom palette", 3000)
 		elif index == 2:  # Region Cleanup tab
 				self.statusBar().showMessage("Step 3: Clean up small regions for laser engraving", 3000)
+		elif index == 3:  # Arrange Regions tab
+				self.statusBar().showMessage("Step 4: Arrange regions by color for laser engraving layout", 3000)
 
 	def _switch_to_color_simplification(self) -> None:
 		"""Switch to the color simplification tab."""
@@ -332,5 +339,7 @@ class MainWindow(QMainWindow):
 		"""Handle image view resize events."""
 		# Update the background removal view size to match
 		self._bg_panel._background_removal_view.setGeometry(0, 0, self._image_view.width(), self._image_view.height())
+		# Update arrange regions overlay view
+		self._arrange_regions_panel._region_overlay_view.setGeometry(0, 0, self._image_view.width(), self._image_view.height())
 		# Call the original resize event
 		QWidget.resizeEvent(self._image_view, event)
