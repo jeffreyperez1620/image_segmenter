@@ -17,6 +17,8 @@ class RegionData:
     image: np.ndarray  # RGBA image of the region
     position: Tuple[int, int]  # Current position (x, y)
     original_position: Tuple[int, int]  # Original position (x, y)
+    rotation: float = 0.0  # Rotation angle in degrees
+    original_rotation: float = 0.0  # Original rotation angle in degrees
 
 
 @dataclass

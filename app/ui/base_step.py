@@ -218,9 +218,10 @@ class BaseStep(QWidget):
         Called when this step becomes inactive.
         Subclasses can override this to disconnect widgets, cleanup state, etc.
         """
-        self._chk_show_base.toggled.disconnect(self._on_show_base_toggled)
-        self._btn_apply_to_base.clicked.disconnect(self._on_apply_to_base_clicked)
-        self._btn_reset.clicked.disconnect(self._on_reset_clicked)
+        # Disconnect all signals 
+        self._chk_show_base.toggled.disconnect()
+        self._btn_apply_to_base.clicked.disconnect()
+        self._btn_reset.clicked.disconnect()
 
     def _update_controls(self) -> None:
         """Update the Show Base Image checkbox state."""

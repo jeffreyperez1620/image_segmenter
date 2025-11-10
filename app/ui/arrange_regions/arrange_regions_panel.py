@@ -28,6 +28,8 @@ class ArrangeRegionsPanel(BaseStep):
     statusBarMessage = Signal(str)
     
     def __init__(self, parent: Optional[QWidget] = None, app_state: Optional[AppState] = None, image_view: Optional[ImageView] = None):
+        # Track if any regions have been moved or rotated from their original positions
+        self._has_region_changes = False
         super().__init__(parent, app_state, image_view)
         
         # Region model: Dict[color_tuple, ColorRegions]
@@ -40,33 +42,31 @@ class ArrangeRegionsPanel(BaseStep):
         self._region_overlay_view: Optional[RegionOverlayView] = None
         
         self._init_ui()
+        
+        # Create region overlay view after UI is initialized
+        if self._image_view:
+            self._region_overlay_view = RegionOverlayView(
+                self._image_view, 
+                self._app_state, 
+                self._image_view, 
+                region_model=self._region_model,
+                panel=self
+            )
     
     def _init_ui(self) -> None:
         """Initialize the user interface."""
-        # Create main widget
         main_widget = QWidget()
         layout = QVBoxLayout(main_widget)
-        layout.setAlignment(Qt.AlignTop)
+        layout.setContentsMargins(0, 0, 0, 0)
         
-        # Create region overlay view
-        self._region_overlay_view = RegionOverlayView(self._image_view, self._app_state, self._image_view)
-        
-        # Instructions
-        instructions = QLabel(
-            "Select a color from the palette to view and arrange its regions. "
-            "Drag regions to reposition them. Use Reset to restore original positions."
-        )
-        instructions.setWordWrap(True)
-        layout.addWidget(instructions)
-        
-        # Color Palette section
+        # Color palette table
         palette_group = QGroupBox("Color Palette")
+        palette_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         palette_layout = QVBoxLayout(palette_group)
         
-        # Create palette table
         self.palette_table = QTableWidget()
         self.palette_table.setColumnCount(2)
-        self.palette_table.setHorizontalHeaderLabels(["Color", "RGB"])
+        self.palette_table.setHorizontalHeaderLabels(["Color", "Info"])
         self.palette_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
         self.palette_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.palette_table.setColumnWidth(0, 50)
@@ -121,6 +121,11 @@ class ArrangeRegionsPanel(BaseStep):
     
     def _on_color_selected(self) -> None:
         """Handle color selection from the palette table."""
+        # Clear active region when selection changes
+        if self._region_overlay_view is not None and self._region_overlay_view._active_item:
+            self._region_overlay_view._active_item.set_active(False)
+            self._region_overlay_view._active_item = None
+        
         selected_rows = self.palette_table.selectionModel().selectedRows()
         
         if not selected_rows:
@@ -141,6 +146,9 @@ class ArrangeRegionsPanel(BaseStep):
     
     def _update_region_display(self) -> None:
         """Update the region display based on selected color."""
+        if self._region_overlay_view is None:
+            return
+        
         base_image = self._app_state.base_image
         if base_image is None:
             return
@@ -167,10 +175,15 @@ class ArrangeRegionsPanel(BaseStep):
         if not self._region_model:
             return
         
-        # Restore original positions for all regions
+        # Restore original positions and rotations for all regions
         for color_regions in self._region_model.values():
             for region in color_regions.regions:
                 region.position = region.original_position
+                region.rotation = region.original_rotation
+        
+        # Mark changes as applied (regions reset to original)
+        self._has_region_changes = False
+        self.mark_changes_applied()
         
         # Update display if a color is selected
         if self._selected_color and self._region_overlay_view:
@@ -180,6 +193,20 @@ class ArrangeRegionsPanel(BaseStep):
                 self._region_overlay_view.set_regions(color_regions)
         
         self.statusBarMessage.emit("All regions reset to original positions")
+    
+    def _on_region_changed(self) -> None:
+        """Called when a region is moved or rotated."""
+        self._has_region_changes = True
+        self.mark_changes_unapplied()
+    
+    def has_unapplied_changes(self) -> bool:
+        """Override to check if any regions have been moved or rotated."""
+        return self._has_region_changes
+    
+    def mark_changes_applied(self) -> None:
+        """Override to also clear region changes flag."""
+        super().mark_changes_applied()
+        self._has_region_changes = False
     
     def validate_entry(self) -> bool:
         """Validate the entry of the step."""
@@ -219,6 +246,10 @@ class ArrangeRegionsPanel(BaseStep):
         """Handle open event."""
         super()._on_open()
         
+        # Reset region changes tracking
+        self._has_region_changes = False
+        self.mark_changes_applied()
+        
         # Disable Apply To Base button
         self._btn_apply_to_base.setEnabled(False)
         
@@ -229,8 +260,16 @@ class ArrangeRegionsPanel(BaseStep):
             transparent = np.zeros((h, w, 4), dtype=np.uint8)
             self._app_state.working_image = transparent
         
+        # Activate overlay
+        if self._region_overlay_view is not None:
+            self._region_overlay_view.set_active(True)
+        
         # Build region model
         self._build_region_model()
+        
+        # Update overlay view with region model reference
+        if self._region_overlay_view is not None:
+            self._region_overlay_view._region_model = self._region_model
         
         # Update palette table
         self._update_palette_table()
@@ -238,18 +277,12 @@ class ArrangeRegionsPanel(BaseStep):
         # Connect table selection
         self.palette_table.selectionModel().selectionChanged.connect(self._on_color_selected)
         
-        # Override Reset button
-        try:
-            self._btn_reset.clicked.disconnect()
-        except:
-            pass
+        # Override Reset button - disconnect all first, then connect
+        self._btn_reset.clicked.disconnect()
         self._btn_reset.clicked.connect(self._on_reset_clicked)
         
-        # Connect Show Base Image checkbox to update display
-        try:
-            self._chk_show_base.toggled.disconnect()
-        except:
-            pass
+        # Connect Show Base Image checkbox to update display - disconnect all first
+        self._chk_show_base.toggled.disconnect()
         self._chk_show_base.toggled.connect(self._update_region_display)
         
         # Initialize display
@@ -257,36 +290,45 @@ class ArrangeRegionsPanel(BaseStep):
         
         self.statusBarMessage.emit("Arrange Regions: Select a color to view and arrange its regions")
     
+    def _update_controls_state(self):
+        """Override to keep Apply to Base disabled (regions are not saved to base)."""
+        has_base = self._app_state.base_image is not None
+        
+        # Always disable Apply to Base - regions are just for arrangement, not for saving
+        self._btn_apply_to_base.setEnabled(False)
+    
     def _on_close(self) -> None:
         """Handle close event."""
         super()._on_close()
         
-        # Clear regions overlay
+        # Deactivate overlay and clear regions
         if self._region_overlay_view:
+            self._region_overlay_view.set_active(False)
             self._region_overlay_view.set_regions(None)
         
-        # Disconnect table selection
+        # Disconnect table selection and other signals
         self.palette_table.selectionModel().selectionChanged.disconnect(self._on_color_selected)
-        self._chk_show_base.toggled.disconnect(self._update_region_display)
-        self._btn_reset.clicked.disconnect(self._on_reset_clicked)
         
         # Clear selection
+        self.palette_table.clearSelection()
         self._selected_color = None
     
-    def _extract_unique_colors(self, image: np.ndarray) -> List[QColor]:
+    def _extract_unique_colors(self, image: np.ndarray) -> List[Tuple[int, int, int]]:
         """Extract unique colors from the image."""
-        if image is None or len(image.shape) < 3:
-            return []
-        
-        # Reshape image to get all pixels
-        pixels = image.reshape(-1, image.shape[-1])
-        
-        # Get unique colors (only RGB channels, ignore alpha)
-        unique_rgb = np.unique(pixels[:, :3], axis=0)
-        
-        # Convert to QColor list
-        colors = []
-        for rgb in unique_rgb:
-            colors.append(QColor(int(rgb[0]), int(rgb[1]), int(rgb[2])))
-        
-        return colors
+        if len(image.shape) == 2:
+            # Grayscale
+            unique_vals = np.unique(image)
+            return [(int(v), int(v), int(v)) for v in unique_vals]
+        elif len(image.shape) == 3:
+            # Color image
+            if image.shape[2] == 4:
+                # RGBA - ignore alpha for color comparison
+                rgb = image[:, :, :3]
+            else:
+                rgb = image
+            # Reshape to list of pixels
+            pixels = rgb.reshape(-1, rgb.shape[-1])
+            # Get unique colors
+            unique_colors = np.unique(pixels, axis=0)
+            return [tuple(int(c) for c in color) for color in unique_colors]
+        return []

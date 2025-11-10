@@ -168,24 +168,40 @@ class MainWindow(QMainWindow):
 		# Check for unapplied changes when trying to switch tabs
 		currentTab = self._tab_widget.widget(current_index)
 		if currentTab is not None and isinstance(currentTab, BaseStep) and currentTab.has_unapplied_changes():
-			choice = self._show_unapplied_changes_dialog()
+			# Custom message for Arrange Regions step
+			from ui.arrange_regions.arrange_regions_panel import ArrangeRegionsPanel
+			if isinstance(currentTab, ArrangeRegionsPanel):
+				message = (
+					"Region positioning and rotations will be discarded if you continue.\n\n"
+					"These changes cannot be saved to the base image.\n\n"
+					"What would you like to do?"
+				)
+				choice = self._show_unapplied_changes_dialog(message)
+			else:
+				choice = self._show_unapplied_changes_dialog()
 			
 			if choice == "cancel":
 				return False  # Prevent the tab change
 			elif choice == "discard":
-				# User chose to discard changes, reset working image to base
+				# User chose to discard changes
 				self._app_state.reset_working_image()
+				currentTab.mark_changes_applied()
 			elif choice == "apply":
-			# User chose to apply changes, update base image
-				self._app_state.apply_working_to_base()
-			currentTab.mark_changes_applied()
+				# User chose to apply changes
+				if isinstance(currentTab, ArrangeRegionsPanel):
+					# Arrange Regions doesn't support applying to base, just mark as applied
+					currentTab.mark_changes_applied()
+				else:
+					# For other steps, update base image
+					self._app_state.apply_working_to_base()
+					currentTab.mark_changes_applied()
 	
 		return True  # Allow the tab change
 
-	def _show_unapplied_changes_dialog(self) -> str:
+	def _show_unapplied_changes_dialog(self, message: str = None) -> str:
 		"""Show dialog with three choices for unapplied changes."""
 		from ui.unapplied_changes_dialog import UnappliedChangesDialog
-		return UnappliedChangesDialog.show_dialog(self)
+		return UnappliedChangesDialog.show_dialog(self, message)
 
 	def _on_tab_change_requested(self, index: int) -> None:
 		"""Handle tab change requests to validate before switching."""
@@ -340,6 +356,7 @@ class MainWindow(QMainWindow):
 		# Update the background removal view size to match
 		self._bg_panel._background_removal_view.setGeometry(0, 0, self._image_view.width(), self._image_view.height())
 		# Update arrange regions overlay view
-		self._arrange_regions_panel._region_overlay_view.setGeometry(0, 0, self._image_view.width(), self._image_view.height())
+		if self._arrange_regions_panel._region_overlay_view:
+			self._arrange_regions_panel._region_overlay_view.setGeometry(0, 0, self._image_view.width(), self._image_view.height())
 		# Call the original resize event
 		QWidget.resizeEvent(self._image_view, event)
