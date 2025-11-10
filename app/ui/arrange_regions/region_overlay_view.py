@@ -7,7 +7,7 @@ from __future__ import annotations
 from typing import Optional, List, Dict, Tuple
 import numpy as np
 from PySide6.QtCore import Qt, QPointF, QRectF
-from PySide6.QtGui import QMouseEvent, QPainter, QPen, QColor, QBrush, QCursor
+from PySide6.QtGui import QMouseEvent, QPainter, QPen, QColor, QBrush, QCursor, QWheelEvent
 from PySide6.QtWidgets import QWidget
 
 from model import AppState
@@ -161,6 +161,26 @@ class RegionOverlayView(QWidget):
         if self._image_view and hasattr(self._image_view, '_view'):
             self._image_view._view.viewport().unsetCursor()
     
+    def _forward_event_to_image_view(self, event: QMouseEvent) -> None:
+        """Forward mouse events to the image view."""
+        if self._image_view and hasattr(self._image_view, '_view'):
+            # Create a new event with the same properties but targeted at the image view
+            new_event = QMouseEvent(
+                event.type(),
+                event.position(),
+                event.button(),
+                event.buttons(),
+                event.modifiers()
+            )
+            self._image_view.eventFilter(self._image_view._view.viewport(), new_event)
+    
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        """Forward wheel events to the image view for zooming."""
+        if self._image_view and hasattr(self._image_view, '_view'):
+            self._image_view._view.wheelEvent(event)
+        else:
+            super().wheelEvent(event)
+    
     def _delta_to_centroid(self, scene_pos: QPointF, item: RegionPixmapItem) -> QPointF:
         """Get the (dx, dy) vector from the region centroid to the given scene position."""
         centroid_item = item.get_centroid()
@@ -169,32 +189,74 @@ class RegionOverlayView(QWidget):
         return delta
     
     def _is_on_rotation_handle(self, scene_pos: QPointF, item: Optional[RegionPixmapItem]) -> bool:
-        """Check if the point is on the rotation handle circle."""
+        """Check if the point is on the rotation handle circle.
+        
+        We work in widget coordinates for hit testing to match the visual representation.
+        The radius is defined in scene coordinates (30 pixels), but we convert everything
+        to widget coordinates to properly account for zoom.
+        """
         if item is None or not item.is_active():
             return False
         
-        delta = self._delta_to_centroid(scene_pos, item)
-        distance = np.sqrt(delta.x() ** 2 + delta.y() ** 2)
-        return self._rotation_handle_radius - self._rotation_handle_threshold <= distance and \
-        distance <= self._rotation_handle_radius + self._rotation_handle_threshold
+        # Convert scene position to widget coordinates
+        scene_pos_widget = self._scene_to_widget(scene_pos)
+        
+        # Get the centroid in widget coordinates
+        centroid_item = item.get_centroid()
+        centroid_scene = item.mapToScene(centroid_item)
+        centroid_widget = self._scene_to_widget(centroid_scene)
+        
+        # Calculate distance in widget coordinates
+        delta_widget = scene_pos_widget - centroid_widget
+        distance_widget = np.sqrt(delta_widget.x() ** 2 + delta_widget.y() ** 2)
+        
+        # Get the current zoom/scale factor from the view
+        if self._image_view and hasattr(self._image_view, '_view'):
+            transform = self._image_view._view.transform()
+            scale_factor = abs(transform.m11())
+            if scale_factor < 0.001:
+                scale_factor = 1.0
+        else:
+            scale_factor = 1.0
+        
+        # Scale the rotation handle radius and threshold to widget coordinates
+        # The radius is in scene pixels, so multiply by scale factor to get widget pixels
+        scaled_radius = self._rotation_handle_radius * scale_factor
+        scaled_threshold = self._rotation_handle_threshold * scale_factor
+        
+        # Check if distance (in widget coordinates) is within the scaled radius range
+        min_distance = max(0, scaled_radius - scaled_threshold)
+        max_distance = scaled_radius + scaled_threshold
+        is_on_handle = min_distance <= distance_widget <= max_distance
+        
+        return is_on_handle
     
     def mousePressEvent(self, event: QMouseEvent) -> None:
         """Handle mouse press event."""
         if event.button() != Qt.LeftButton:
-            super().mousePressEvent(event)
+            # Forward non-left button events to ImageView for right-click panning
+            self._forward_event_to_image_view(event)
             return
         
         scene_pos = self._widget_to_scene(event.position().toPoint())
         item = self._find_item_at_position(scene_pos)
         
-        # Clicked on empty space or transparent pixel while rotating, allow rotation
-        if item is None and self._active_item and self._is_on_rotation_handle(scene_pos, self._active_item):
-            # Start rotation
-            delta = self._delta_to_centroid(scene_pos, self._active_item)
-            self._rotating_item = self._active_item
-            self._rotation_start_angle = np.arctan2(delta.y(), delta.x()) * 180.0 / np.pi
-            event.accept()
-            return
+        # Clicked on empty space or transparent pixel, check if on rotation handle
+        if item is None and self._active_item:
+            if self._is_on_rotation_handle(scene_pos, self._active_item):
+                # Start rotation
+                delta = self._delta_to_centroid(scene_pos, self._active_item)
+                self._rotating_item = self._active_item
+                self._rotation_start_angle = np.arctan2(delta.y(), delta.x()) * 180.0 / np.pi
+                event.accept()
+                return
+            else:
+                # Clicked on transparent pixel, clear active region
+                if self._active_item:
+                    self._active_item.set_active(False)
+                self._active_item = None
+                self.update()
+                return
         
         if item:
             # Set as active region if not already active.
@@ -227,11 +289,16 @@ class RegionOverlayView(QWidget):
             if self._active_item:
                 self._active_item.set_active(False)
                 self._active_item = None
-            event.ignore()
-            super().mousePressEvent(event)
+            # Forward event to ImageView for panning
+            self._forward_event_to_image_view(event)
     
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         """Handle mouse move event."""
+        # Forward right button drag events for panning
+        if event.buttons() & Qt.RightButton:
+            self._forward_event_to_image_view(event)
+            return
+        
         if not self._region_items:
             super().mouseMoveEvent(event)
             return
@@ -297,18 +364,20 @@ class RegionOverlayView(QWidget):
             
             event.accept()
         else:
-            # Update hover state (but don't override active item outline)
+            # Not dragging/rotating - check for hover or forward for panning
             item = self._find_item_at_position(scene_pos)
             
-            if item != self._hovered_item:
-                if self._hovered_item:
-                    self._hovered_item.set_hovered(False)
-                if item:
+            if item:
+                # Update hover state (but don't override active item outline)
+                if item != self._hovered_item:
+                    if self._hovered_item:
+                        self._hovered_item.set_hovered(False)
                     item.set_hovered(True)
-                self._hovered_item = item
+                    self._hovered_item = item
                 event.accept()
             else:
-                event.accept()
+                # Not over a region - forward for panning
+                self._forward_event_to_image_view(event)
         
         super().mouseMoveEvent(event)
     
@@ -323,7 +392,8 @@ class RegionOverlayView(QWidget):
                 self._rotation_start_angle = 0.0
             event.accept()
         else:
-            super().mouseReleaseEvent(event)
+            # Forward non-left button events to ImageView
+            self._forward_event_to_image_view(event)
     
     def set_active(self, active: bool) -> None:
         """Set whether the overlay is active."""
@@ -348,30 +418,45 @@ class RegionOverlayView(QWidget):
         centroid_scene = self._active_item.mapToScene(centroid_item)
         centroid_widget = self._scene_to_widget(centroid_scene)
         
+        # Get the current zoom/scale factor from the view
+        if self._image_view and hasattr(self._image_view, '_view'):
+            # Get the transform matrix and extract the scale factor
+            transform = self._image_view._view.transform()
+            # The scale factor is the square root of the determinant of the 2x2 matrix
+            # For uniform scaling, we can use m11 or m22 (they should be equal)
+            scale_factor = transform.m11()
+        else:
+            scale_factor = 1.0
+        
+        # Scale the rotation handle radius and other dimensions by the zoom factor
+        scaled_radius = self._rotation_handle_radius * scale_factor
+        scaled_indicator_length = (self._rotation_handle_radius - 5) * scale_factor
+        scaled_arrow_size = 8 * scale_factor
+        scaled_pen_width = max(1, int(2 * scale_factor))  # Minimum 1 pixel
+        scaled_line_width = max(1, int(3 * scale_factor))  # Minimum 1 pixel
+        
         # Draw rotation circle
-        pen = QPen(QColor(255, 255, 0), 2)  # Yellow circle
+        pen = QPen(QColor(255, 255, 0), scaled_pen_width)  # Yellow circle
         painter.setPen(pen)
         painter.setBrush(Qt.NoBrush)
-        painter.drawEllipse(centroid_widget, self._rotation_handle_radius, self._rotation_handle_radius)
+        painter.drawEllipse(centroid_widget, scaled_radius, scaled_radius)
         
         # Draw rotation indicator (arrow/line pointing in rotation direction)
         rotation_rad = np.radians(self._active_item._region_data.rotation)
-        indicator_length = self._rotation_handle_radius - 5
-        end_x = centroid_widget.x() + np.cos(rotation_rad) * indicator_length
-        end_y = centroid_widget.y() + np.sin(rotation_rad) * indicator_length
+        end_x = centroid_widget.x() + np.cos(rotation_rad) * scaled_indicator_length
+        end_y = centroid_widget.y() + np.sin(rotation_rad) * scaled_indicator_length
         
         # Draw line from center to rotation angle
-        pen = QPen(QColor(255, 255, 0), 3)  # Thicker yellow line
+        pen = QPen(QColor(255, 255, 0), scaled_line_width)  # Thicker yellow line
         painter.setPen(pen)
         painter.drawLine(centroid_widget, QPointF(end_x, end_y))
         
         # Draw arrowhead at the end
-        arrow_size = 8
         arrow_angle = np.pi / 6  # 30 degrees
-        arrow1_x = end_x - arrow_size * np.cos(rotation_rad - arrow_angle)
-        arrow1_y = end_y - arrow_size * np.sin(rotation_rad - arrow_angle)
-        arrow2_x = end_x - arrow_size * np.cos(rotation_rad + arrow_angle)
-        arrow2_y = end_y - arrow_size * np.sin(rotation_rad + arrow_angle)
+        arrow1_x = end_x - scaled_arrow_size * np.cos(rotation_rad - arrow_angle)
+        arrow1_y = end_y - scaled_arrow_size * np.sin(rotation_rad - arrow_angle)
+        arrow2_x = end_x - scaled_arrow_size * np.cos(rotation_rad + arrow_angle)
+        arrow2_y = end_y - scaled_arrow_size * np.sin(rotation_rad + arrow_angle)
         
         painter.drawLine(QPointF(end_x, end_y), QPointF(arrow1_x, arrow1_y))
         painter.drawLine(QPointF(end_x, end_y), QPointF(arrow2_x, arrow2_y))

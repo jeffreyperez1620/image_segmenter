@@ -22,9 +22,6 @@ from ui.region_cleanup.color_palette_widget import ColorPaletteWidget
 class RegionCleanupPanel(BaseStep):
     """Panel for region cleanup and merging operations."""
     
-    # TODO: Limit Region Cleanup step to images with 32 or fewer colors for performance reasons.
-    # Images with more colors can cause significant performance issues during region analysis.
-    
     statusBarMessage = Signal(str)
     
     def __init__(self, parent: Optional[QWidget] = None, app_state: Optional[AppState] = None, image_view: Optional[ImageView] = None) -> None:
