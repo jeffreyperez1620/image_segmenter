@@ -8,9 +8,10 @@ from PySide6.QtWidgets import QWidget
 
 from model import AppState
 from ui.image_view import ImageView
+from ui.base_overlay_view import BaseOverlayView
 
 
-class EyedropperView(QWidget):
+class EyedropperView(BaseOverlayView):
     """A transparent overlay widget that handles eyedropper functionality for color picking."""
     
     # Signals
@@ -18,47 +19,16 @@ class EyedropperView(QWidget):
     eyedropper_cancelled = Signal()
     
     def __init__(self, image_view: ImageView, app_state: AppState, parent: Optional[QWidget] = None):
-        super().__init__(parent)
-        self._image_view = image_view
-        self._app_state = app_state
-        self._active = False
+        super().__init__(image_view, app_state, parent, enable_mouse_tracking=True, use_blank_cursor=True)
         self._preview_color = None
         self._mouse_pos = QPoint(0, 0)
-        
-        # Make the widget transparent and capture mouse events
-        self.setAttribute(Qt.WA_TransparentForMouseEvents, False)
-        self.setAttribute(Qt.WA_NoSystemBackground, True)
-        self.setMouseTracking(True)
-        # Hide the system cursor when this widget is active
-        self.setCursor(Qt.BlankCursor)
-        
-        # Don't set geometry here - it will be set when activated
-        # The ImageView might not have its final size yet during initialization
-        
-        # Initially hidden
-        self.hide()
     
     def set_active(self, active: bool) -> None:
         """Activate or deactivate the eyedropper."""
-        self._active = active
-        if active:
-            # Update geometry to match the viewport size
-            viewport = self._image_view._view.viewport()
-            if viewport:
-                self.setGeometry(0, 0, viewport.width(), viewport.height())
-            self.show()
-            self.raise_()  # Ensure it's on top
-            # Hide the system cursor - we'll draw our own crosshair
-            self._image_view._view.viewport().setCursor(Qt.BlankCursor)
-        else:
-            self.hide()
-            self._image_view._view.viewport().unsetCursor()
+        super().set_active(active)
+        if not active:
             self._preview_color = None
             self.update()
-    
-    def is_active(self) -> bool:
-        """Check if the eyedropper is active."""
-        return self._active
     
     def mousePressEvent(self, event: QMouseEvent) -> None:
         """Handle mouse press events for color picking."""
@@ -183,33 +153,3 @@ class EyedropperView(QWidget):
         
         return None
     
-    def _forward_event_to_image_view(self, event: QMouseEvent) -> None:
-        """Forward mouse events to the image view."""
-        # Create a new event with the same properties but targeted at the image view
-        new_event = QMouseEvent(
-            event.type(),
-            event.pos(),
-            event.button(),
-            event.buttons(),
-            event.modifiers()
-        )
-        self._image_view.eventFilter(self._image_view._view.viewport(), new_event)
-    
-    def _forward_wheel_event_to_image_view(self, event) -> None:
-        """Forward wheel events to the image view."""
-        self._image_view._view.wheelEvent(event)
-    
-    def _forward_key_event_to_image_view(self, event) -> None:
-        """Forward key events to the image view."""
-        self._image_view._view.keyPressEvent(event)
-    
-    def resizeEvent(self, event) -> None:
-        """Handle resize events."""
-        super().resizeEvent(event)
-        # Ensure the eyedropper view covers the entire viewport
-        if self.parent():
-            self.setGeometry(0, 0, self.parent().width(), self.parent().height())
-        elif self._image_view:
-            # Fallback to viewport size
-            viewport = self._image_view._view.viewport()
-            self.setGeometry(0, 0, viewport.width(), viewport.height())

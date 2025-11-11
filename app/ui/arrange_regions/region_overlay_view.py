@@ -13,26 +13,20 @@ from PySide6.QtWidgets import QWidget
 from model import AppState
 from processing.arrange_regions import ColorRegions, RegionData
 from ui.image_view import ImageView
+from ui.base_overlay_view import BaseOverlayView
 from ui.arrange_regions.region_pixmap_item import RegionPixmapItem
 import cv2 as cv
 
 
-class RegionOverlayView(QWidget):
+class RegionOverlayView(BaseOverlayView):
     """Widget for handling region display and interaction."""
     
     def __init__(self, parent=None, app_state: Optional[AppState] = None, image_view: Optional[ImageView] = None, region_model: Optional[Dict] = None, panel=None):
-        super().__init__(parent)
+        super().__init__(image_view, app_state, parent, enable_mouse_tracking=True, use_blank_cursor=False)
         
         # Reference to panel for notifying about changes
         self._panel = panel
         
-        # Make this widget transparent and able to receive mouse events
-        self.setAttribute(Qt.WA_TransparentForMouseEvents, False)
-        self.setAttribute(Qt.WA_NoSystemBackground, True)
-        self.setStyleSheet("background: transparent;")
-        
-        self._image_view = image_view
-        self._app_state = app_state
         self._region_model = region_model  # Reference to all color regions
         
         # Region items (QGraphicsItems added to scene)
@@ -53,12 +47,6 @@ class RegionOverlayView(QWidget):
         
         # Image bounds for constraint checking
         self._image_bounds: Optional[QRectF] = None
-        
-        # Active state (whether overlay is enabled)
-        self._active = False
-        
-        # Don't set geometry here - it will be set when activated
-        # The ImageView might not have its final size yet during initialization
     
     def set_regions(self, color_regions: Optional[ColorRegions]) -> None:
         """Set the regions to display."""
@@ -142,11 +130,6 @@ class RegionOverlayView(QWidget):
         
         return None
     
-    def enterEvent(self, event) -> None:
-        """Handle enter event to enable mouse tracking."""
-        super().enterEvent(event)
-        self.setMouseTracking(True)
-    
     def leaveEvent(self, event) -> None:
         """Handle leave event to clear hover state."""
         super().leaveEvent(event)
@@ -158,25 +141,6 @@ class RegionOverlayView(QWidget):
         if self._image_view and hasattr(self._image_view, '_view'):
             self._image_view._view.viewport().unsetCursor()
     
-    def _forward_event_to_image_view(self, event: QMouseEvent) -> None:
-        """Forward mouse events to the image view."""
-        if self._image_view and hasattr(self._image_view, '_view'):
-            # Create a new event with the same properties but targeted at the image view
-            new_event = QMouseEvent(
-                event.type(),
-                event.position(),
-                event.button(),
-                event.buttons(),
-                event.modifiers()
-            )
-            self._image_view.eventFilter(self._image_view._view.viewport(), new_event)
-    
-    def wheelEvent(self, event: QWheelEvent) -> None:
-        """Forward wheel events to the image view for zooming."""
-        if self._image_view and hasattr(self._image_view, '_view'):
-            self._image_view._view.wheelEvent(event)
-        else:
-            super().wheelEvent(event)
     
     def _delta_to_centroid(self, scene_pos: QPointF, item: RegionPixmapItem) -> QPointF:
         """Get the (dx, dy) vector from the region centroid to the given scene position."""
@@ -297,7 +261,8 @@ class RegionOverlayView(QWidget):
             return
         
         if not self._region_items:
-            super().mouseMoveEvent(event)
+            # No regions to interact with, forward event for panning
+            self._forward_event_to_image_view(event)
             return
         
         scene_pos = self._widget_to_scene(event.position().toPoint())
@@ -375,8 +340,6 @@ class RegionOverlayView(QWidget):
             else:
                 # Not over a region - forward for panning
                 self._forward_event_to_image_view(event)
-        
-        super().mouseMoveEvent(event)
     
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         """Handle mouse release event."""
@@ -391,23 +354,6 @@ class RegionOverlayView(QWidget):
         else:
             # Forward non-left button events to ImageView
             self._forward_event_to_image_view(event)
-    
-    def set_active(self, active: bool) -> None:
-        """Set whether the overlay is active."""
-        self._active = active
-        if active:
-            # Update geometry to match the viewport size
-            viewport = self._image_view._view.viewport()
-            if viewport:
-                self.setGeometry(0, 0, viewport.width(), viewport.height())
-            self.show()
-            self.raise_()  # Ensure it's on top
-        else:
-            # Clear active item when deactivating
-            if self._active_item:
-                self._active_item.set_active(False)
-                self._active_item = None
-        self.update()
     
     def paintEvent(self, event) -> None:
         """Paint the rotation handles for active regions."""
@@ -465,13 +411,3 @@ class RegionOverlayView(QWidget):
         painter.drawLine(QPointF(end_x, end_y), QPointF(arrow1_x, arrow1_y))
         painter.drawLine(QPointF(end_x, end_y), QPointF(arrow2_x, arrow2_y))
     
-    def resizeEvent(self, event) -> None:
-        """Handle resize events to keep the overlay properly sized."""
-        super().resizeEvent(event)
-        # The overlay should always match the parent's (viewport's) size
-        if self.parent():
-            self.setGeometry(0, 0, self.parent().width(), self.parent().height())
-        elif self._image_view:
-            # Fallback to viewport size
-            viewport = self._image_view._view.viewport()
-            self.setGeometry(0, 0, viewport.width(), viewport.height())

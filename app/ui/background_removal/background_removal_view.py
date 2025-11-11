@@ -16,12 +16,13 @@ from PySide6.QtWidgets import QWidget, QGraphicsView
 
 from model import AppState
 from ui.image_view import ImageView
+from ui.base_overlay_view import BaseOverlayView
 
 from .overlay_widget import MaskOverlayItem
 from .crop_rectangle_widget import CropRectangleItem
 
 
-class BackgroundRemovalView(QWidget):
+class BackgroundRemovalView(BaseOverlayView):
     """Widget for handling background removal specific interactions."""
     
     # Signals
@@ -29,15 +30,19 @@ class BackgroundRemovalView(QWidget):
     crop_rect_changed = Signal(QRectF)  # Emitted when crop rectangle changes
     
     def __init__(self, parent=None, app_state: Optional[AppState] = None, image_view: Optional[ImageView] = None):
-        super().__init__(parent)
+        # BaseOverlayView requires image_view and app_state, but they may be None here
+        if image_view is None or app_state is None:
+            # Create temporary objects if needed (they'll be set properly later)
+            from model import AppState as AppStateClass
+            super().__init__(image_view or parent, app_state or AppStateClass(), parent, enable_mouse_tracking=True, use_blank_cursor=False)
+        else:
+            super().__init__(image_view, app_state, parent, enable_mouse_tracking=True, use_blank_cursor=False)
         
-        # Make this widget transparent and able to receive mouse events
-        self.setAttribute(Qt.WA_TransparentForMouseEvents, False)
-        self.setAttribute(Qt.WA_NoSystemBackground, True)
-        self.setStyleSheet("background: transparent;")
-        
-        self._image_view = image_view
-        self._app_state = app_state
+        # Override _image_view and _app_state if they were None
+        if image_view is not None:
+            self._image_view = image_view
+        if app_state is not None:
+            self._app_state = app_state
         
         # Interaction state
         self._mode: str = "include"  # include|exclude|erase|crop
@@ -99,16 +104,14 @@ class BackgroundRemovalView(QWidget):
         self._mask_overlay.setVisible(True)
         self._crop_overlay.setVisible(True)
         
-    def resizeEvent(self, event):
-        """Handle resize events to keep the overlay properly sized."""
-        super().resizeEvent(event)
-        # The overlay should always match the parent's (viewport's) size
-        if self.parent():
-            self.setGeometry(0, 0, self.parent().width(), self.parent().height())
-        elif self._image_view:
-            # Fallback to image view size
-            viewport = self._image_view._view.viewport()
-            self.setGeometry(0, 0, viewport.width(), viewport.height())
+    def setVisible(self, visible: bool) -> None:
+        """Override setVisible to use set_active for consistency."""
+        # Only call set_active if the visibility is actually changing to avoid recursion
+        if visible != self._active:
+            self.set_active(visible)
+        else:
+            # If visibility matches active state, just set it directly to avoid recursion
+            QWidget.setVisible(self, visible)
         
     def set_brush_size(self, size: int):
         """Set the brush size for painting."""

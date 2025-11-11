@@ -46,9 +46,9 @@ class ArrangeRegionsPanel(BaseStep):
         # Create region overlay view after UI is initialized
         if self._image_view:
             self._region_overlay_view = RegionOverlayView(
-                self._image_view, 
-                self._app_state, 
-                self._image_view, 
+                parent=self._image_view,
+                app_state=self._app_state,
+                image_view=self._image_view,
                 region_model=self._region_model,
                 panel=self
             )

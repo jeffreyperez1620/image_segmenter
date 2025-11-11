@@ -53,6 +53,11 @@ class RegionPixmapItem(QGraphicsPixmapItem):
         
         # Set Z-value to be above base image
         self.setZValue(100)
+        
+        # Disable mouse event acceptance - the overlay widget will handle all mouse interactions
+        # This prevents the graphics items from capturing events before the overlay receives them
+        self.setAcceptedMouseButtons(Qt.NoButton)
+        self.setAcceptHoverEvents(False)
     
     def _extract_contour(self, region_image: np.ndarray) -> None:
         """Extract the contour path from the region image."""
