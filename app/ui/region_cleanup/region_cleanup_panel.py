@@ -14,7 +14,6 @@ from model import AppState
 from processing.color_simplify import create_palette_from_colors
 from ui.base_step import BaseStep
 from ui.image_view import ImageView
-from ui.region_cleanup.region_merge_dialog import RegionMergeDialog, ColorSwatch
 from ui.region_cleanup.flood_fill_view import FloodFillView
 from ui.region_cleanup.brush_view import BrushView
 from ui.region_cleanup.color_palette_widget import ColorPaletteWidget
@@ -270,13 +269,6 @@ class RegionCleanupPanel(BaseStep):
         else:
             self.distribution_text.setText("No distribution data")
     
-    def show_merge_dialog(self, small_region_color: QColor, neighbor_colors: List[QColor], image_data: np.ndarray = None, bbox: Tuple[int, int, int, int] = None) -> Optional[QColor]:
-        """Show dialog for choosing merge color and return selected color."""
-        dialog = RegionMergeDialog(small_region_color, neighbor_colors, self, image_data, bbox)
-        if dialog.exec() == QDialog.Accepted:
-            return dialog.get_selected_color()
-        return None
-    
     def get_selected_flood_fill_color(self) -> Optional[QColor]:
         """Get the currently selected flood fill color."""
         return getattr(self, '_selected_flood_fill_color', None)
@@ -481,7 +473,6 @@ class RegionCleanupPanel(BaseStep):
         
         # Get parameters from the panel
         min_size = self.get_min_region_size()
-        auto_merge_threshold = 0; # Default 0, self.get_auto_merge_threshold()
         connectivity = 8; # Default 8, self.get_connectivity()
         
         # Show progress dialog
@@ -499,8 +490,6 @@ class RegionCleanupPanel(BaseStep):
             cleaned_output = merge_small_regions(
                 working_image,
                 min_size,
-                merge_callback=None,  # Auto-merge for now
-                auto_merge_threshold=auto_merge_threshold,
                 progress_callback=progress_callback,
                 connectivity=connectivity
             )

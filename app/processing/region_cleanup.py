@@ -131,9 +131,9 @@ def analyze_regions(rgba: np.ndarray, min_size_threshold: int = 100, connectivit
     }
 
 
-def find_neighboring_colors_for_component(rgba: np.ndarray, component_mask: np.ndarray, connectivity: int = 8) -> List[Tuple[int, int, int]]:
+def find_neighboring_colors_for_component(rgba: np.ndarray, component_mask: np.ndarray, connectivity: int = 8) -> Tuple[List[Tuple[int, int, int]], Dict[Tuple[int, int, int], int], int, bool, np.ndarray]:
     """
-    Find colors that are adjacent to a specific connected component.
+    Find colors that are adjacent to a specific connected component, along with their counts.
     
     Parameters
     ----------
@@ -141,11 +141,15 @@ def find_neighboring_colors_for_component(rgba: np.ndarray, component_mask: np.n
         Input RGBA image
     component_mask: np.ndarray
         Boolean mask for the specific component
+    connectivity: int
+        Connectivity (4 or 8) for neighbor detection
         
     Returns
     -------
-    List[Tuple[int, int, int]]
-        List of neighboring colors
+    Tuple[List[Tuple[int, int, int]], Dict[Tuple[int, int, int], int], int, bool, np.ndarray]
+        Tuple of (list of unique neighbor colors, dict of color -> count, total adjacent pixels, has_adjacent_pixels, adjacent_mask)
+        has_adjacent_pixels indicates if any adjacent pixels exist (regardless of transparency)
+        adjacent_mask is a boolean mask of pixels adjacent to the component (non-transparent only)
     """
     rgb = rgba[:, :, :3]
     alpha = rgba[:, :, 3]
@@ -163,15 +167,22 @@ def find_neighboring_colors_for_component(rgba: np.ndarray, component_mask: np.n
     
     dilated_mask = cv.dilate(component_mask.astype(np.uint8), kernel, iterations=1)
     
-    # Find pixels that are adjacent but not part of the component
+    # Check if adjacent pixels exist (regardless of transparency)
+    has_adjacent_pixels = np.any((dilated_mask > 0) & ~component_mask)
+    
+    # Find pixels that are adjacent but not part of the component (only non-transparent ones)
     adjacent_mask = (dilated_mask > 0) & ~component_mask & (alpha > 0)
     
-    # Get unique colors in adjacent areas
+    # Get unique colors and their counts in adjacent areas
     if np.any(adjacent_mask):
-        adjacent_colors = np.unique(rgb[adjacent_mask].reshape(-1, 3), axis=0)
-        return [tuple(color) for color in adjacent_colors]
+        adjacent_pixels = rgb[adjacent_mask]
+        unique_colors, counts = np.unique(adjacent_pixels.reshape(-1, 3), axis=0, return_counts=True)
+        color_list = [tuple(color) for color in unique_colors]
+        color_counts = {tuple(color): int(count) for color, count in zip(unique_colors, counts)}
+        total_adjacent = len(adjacent_pixels)
+        return (color_list, color_counts, total_adjacent, has_adjacent_pixels, adjacent_mask)
     else:
-        return []
+        return ([], {}, 0, has_adjacent_pixels, adjacent_mask)
 
 
 def find_neighboring_colors(rgba: np.ndarray, target_color: Tuple[int, int, int], connectivity: int = 8) -> List[Tuple[int, int, int]]:
@@ -333,11 +344,317 @@ def color_distance(color1: Tuple[int, int, int], color2: Tuple[int, int, int]) -
     return min(1.0, max(0.0, distance))
 
 
+def _build_region_graph(
+    all_regions: List[dict],
+    rgba: np.ndarray,
+    connectivity: int = 8,
+    progress_callback: Optional[callable] = None
+) -> Tuple[Dict[int, dict], np.ndarray]:
+    """
+    Build a graph of regions with unique IDs and their neighbors.
+    
+    Parameters
+    ----------
+    all_regions: List[dict]
+        List of region dictionaries from analyze_regions
+    rgba: np.ndarray
+        RGBA image
+    connectivity: int
+        Connectivity for neighbor detection (4 or 8)
+        
+    Returns
+    -------
+    Tuple[Dict[int, dict], np.ndarray]
+        Tuple of (region_registry, global_region_labels)
+        region_registry maps region_id -> {size, color, neighbor_ids, component_id, labels, centroid, bbox}
+        global_region_labels maps each pixel to its region_id (0 = no region/transparent)
+    """
+    h, w = rgba.shape[:2]
+    alpha = rgba[:, :, 3]
+    
+    # Create global region labels array (0 = transparent/no region)
+    global_region_labels = np.zeros((h, w), dtype=np.int32)
+    
+    # Assign unique IDs to each region and build registry
+    region_registry: Dict[int, dict] = {}
+    total_regions = len(all_regions)
+    region_id_counter = 0
+    
+    for i, region in enumerate(all_regions):
+        if progress_callback:
+            # First 50% of progress: assigning IDs and building registry
+            progress_callback(int((i / total_regions) * 50), 100, f"Building region graph: Assigning IDs ({i+1}/{total_regions})...")
+        
+        labels = region['labels']
+        component_id = region['component_id']
+        component_mask = (labels == component_id) & (alpha > 0)
+        
+        # Mark pixels in global labels array
+        global_region_labels[component_mask] = region_id_counter
+        
+        # Store region info
+        region_registry[region_id_counter] = {
+            'size': region['size'],
+            'color': region['color'],
+            'neighbor_ids': set(),
+            'component_id': component_id,
+            'labels': labels,
+            'centroid': region['centroid'],
+            'bbox': region['bbox']
+        }
+        region_id_counter += 1
+
+    # Build neighbor graph using dilation
+    if connectivity == 4:
+        kernel = np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], dtype=np.uint8)
+    else:
+        kernel = np.ones((3, 3), np.uint8)
+    
+    region_items = list(region_registry.items())
+    total_for_neighbors = len(region_items)
+    
+    for idx, (region_id, region_data) in enumerate(region_items):
+        if progress_callback:
+            # Second 50% of progress: building neighbor relationships
+            progress = 50 + int((idx / total_for_neighbors) * 50)
+            progress_callback(progress, 100, f"Building region graph: Finding neighbors ({idx+1}/{total_for_neighbors})...")
+        
+        labels = region_data['labels']
+        component_id = region_data['component_id']
+        component_mask = (labels == component_id) & (alpha > 0).astype(np.uint8)
+        
+        # Dilate to find adjacent pixels
+        dilated_mask = cv.dilate(component_mask, kernel, iterations=1)
+        adjacent_mask = (dilated_mask > 0) & (component_mask == 0) & (alpha > 0)
+        
+        # Find which region IDs are adjacent
+        adjacent_coords = np.where(adjacent_mask)
+        if len(adjacent_coords[0]) > 0:
+            adjacent_region_ids = global_region_labels[adjacent_coords]
+
+            # Convert numpy int32 to Python int to avoid type issues
+            # Filter out zeros (transparent/no region) and the region's own ID
+            # The region's own ID can appear in adjacent positions for C-shaped or concave regions
+            # where dilation causes the dilated contour to include pixels labeled as this region
+            unique_neighbor_ids = set(int(nid) for nid in adjacent_region_ids[adjacent_region_ids > 0] if int(nid) != region_id)
+            
+            region_data['neighbor_ids'] = unique_neighbor_ids
+            
+            # Make the relationship symmetric: if A is a neighbor of B, then B is also a neighbor of A
+            # This should naturally be symmetric, but we enforce it to catch any bugs in neighbor detection
+            # Since neighbor_ids is a set, .add() is idempotent - no need to check if it already exists
+            for neighbor_id in unique_neighbor_ids:
+                if neighbor_id in region_registry:
+                    region_registry[neighbor_id]['neighbor_ids'].add(region_id)
+                else:
+                    # Neighbor hasn't been processed yet or was deleted (shouldn't happen during initialization)
+                    print(f"WARNING: Region {neighbor_id} not found in registry when making relationship symmetric for region {region_id}")
+    
+    return region_registry, global_region_labels
+
+
+def _merge_regions_in_graph(
+    region_registry: Dict[int, dict],
+    region_a_id: int,
+    region_b_id: int,
+    rgba: np.ndarray,
+    small_region_ids: set,
+    min_size: int,
+    image_context: dict
+) -> None:
+    """
+    Merge region A into region B in the graph and update the image.
+    
+    Parameters
+    ----------
+    region_registry: Dict[int, dict]
+        Registry of all regions
+    region_a_id: int
+        ID of region to merge (will be removed)
+    region_b_id: int
+        ID of region to merge into (will be updated)
+    rgba: np.ndarray
+        Image to update
+    small_region_ids: set
+        Set of small region IDs to maintain
+    min_size: int
+        Minimum size threshold for small regions
+    """
+    # Ensure IDs are Python ints (not numpy int32)
+    region_a_id = int(region_a_id)
+    region_b_id = int(region_b_id)
+    
+    # Safety check: don't merge a region into itself
+    if region_a_id == region_b_id:
+        error_msg = f"Cannot merge region {region_a_id} into itself"
+        print(f"ERROR: {error_msg}")
+        raise RuntimeError(error_msg)
+    
+    # Safety check: ensure both regions exist
+    if region_a_id not in region_registry:
+        error_msg = f"Region {region_a_id} not found in registry (may have been deleted)"
+        print(f"ERROR: {error_msg}")
+        raise RuntimeError(error_msg)
+    if region_b_id not in region_registry:
+        error_msg = f"Region {region_b_id} not found in registry (may have been deleted)"
+        print(f"ERROR: {error_msg}")
+        raise RuntimeError(error_msg)
+    
+    region_a = region_registry[region_a_id]
+    region_b = region_registry[region_b_id]
+    
+    # Update color_counts: remove A's pixels, B's count will be updated with new size
+    color_a = region_a['color']
+    color_b = region_b['color']
+    if color_a in image_context['color_counts']:
+        image_context['color_counts'][color_a] -= region_a['size']
+        if image_context['color_counts'][color_a] <= 0:
+            del image_context['color_counts'][color_a]
+    
+    # Update B's size
+    region_b['size'] += region_a['size']
+    
+    # Update color_counts: B's color count increases by A's size
+    if color_b not in image_context['color_counts']:
+        image_context['color_counts'][color_b] = 0
+    image_context['color_counts'][color_b] += region_a['size']
+    
+    # Update max_region_size if B is now larger
+    if region_b['size'] > image_context['max_region_size']:
+        image_context['max_region_size'] = region_b['size']
+    
+    # Update small_region_ids: remove A (being deleted) and B if it's no longer small
+    small_region_ids.discard(region_a_id)
+    if region_b_id in small_region_ids and region_b['size'] >= min_size:
+        small_region_ids.discard(region_b_id)
+    
+    # Update neighbors of A (except B)
+    # Create a copy to avoid "set changed size during iteration" error
+    for neighbor_id in list(region_a['neighbor_ids']):
+        if neighbor_id != region_b_id and neighbor_id in region_registry:
+            neighbor = region_registry[neighbor_id]
+            neighbor['neighbor_ids'].discard(region_a_id)
+            neighbor['neighbor_ids'].add(region_b_id)
+            # Safety check: ensure neighbor doesn't have itself as a neighbor
+            if neighbor_id in neighbor['neighbor_ids']:
+                error_msg = f"ERROR: After updating neighbor {neighbor_id} to point to {region_b_id}, neighbor {neighbor_id} has itself in neighbor_ids! Removing self-reference."  
+                print(error_msg)
+                raise RuntimeError(error_msg)
+    
+    # Update B's neighbors: union of A's and B's neighbors, minus A and B
+    region_b['neighbor_ids'] = (region_a['neighbor_ids'] | region_b['neighbor_ids']) - {region_a_id, region_b_id}
+    # Check for neighbors that no longer exist in the registry (this indicates a bug)
+    deleted_neighbors = {nid for nid in region_b['neighbor_ids'] if nid not in region_registry}
+    if deleted_neighbors:
+        error_msg = (
+            f"ERROR: After merging {region_a_id} into {region_b_id}, region {region_b_id} has neighbors "
+            f"that no longer exist in registry: {deleted_neighbors}. This indicates a bug in graph maintenance."
+        )
+        print(error_msg)
+        raise RuntimeError(error_msg)
+    # Safety check: ensure B doesn't have itself as a neighbor
+    if region_b_id in region_b['neighbor_ids']:
+        error_msg = f"ERROR: After merging {region_a_id} into {region_b_id}, region {region_b_id} has itself in neighbor_ids!"
+        print(error_msg)
+        raise RuntimeError(error_msg)
+    
+    # Update image: set A's pixels to B's color
+    labels_a = region_a['labels']
+    component_id_a = region_a['component_id']
+    alpha = rgba[:, :, 3]
+    component_mask_a = (labels_a == component_id_a) & (alpha > 0)
+    
+    rgb = rgba[:, :, :3]
+    rgb[component_mask_a] = region_b['color']
+    
+    # Remove A from registry
+    del region_registry[region_a_id]
+    
+    # Recursive merge: After merging A into B, check if B now has new neighbors of the same color
+    # This handles the corner case where a small region was sandwiched between two regions
+    # of the same color (e.g., red-green-red). After merging green into red, the two red
+    # regions are now adjacent and should be merged.
+    # Use an open set (queue) to track neighbors that need to be checked/merged
+    # This allows us to add new neighbors discovered during merging without iteration issues
+    # Check for neighbors that no longer exist in the registry (this indicates a bug)
+    deleted_neighbors = {nid for nid in region_b['neighbor_ids'] if nid not in region_registry}
+    if deleted_neighbors:
+        error_msg = (
+            f"ERROR: Before recursive merge, region {region_b_id} has neighbors that no longer exist "
+            f"in registry: {deleted_neighbors}. This indicates a bug in graph maintenance."
+        )
+        print(error_msg)
+        raise RuntimeError(error_msg)
+    same_color_neighbors_to_check = set(region_b['neighbor_ids'])
+
+    # Process the queue until empty
+    while same_color_neighbors_to_check:
+        # Get the next neighbor to merge
+        c_id = same_color_neighbors_to_check.pop()
+        # Double-check it still exists (it might have been merged/deleted)
+        if c_id not in region_registry:
+            print(f"ERROR: Neighbor {c_id} not found in registry (may have been merged/deleted)")
+            continue
+        region_c = region_registry[c_id]
+        if region_c['color'] != region_b['color']:
+            same_color_neighbors_to_check.discard(c_id)
+            continue
+        # Neighbor is the same color as B, merge it into B
+        # First, clean up C's neighbor list to remove any deleted regions (safety check)
+        # This can happen if C's neighbor list wasn't properly updated when a previous merge occurred
+        deleted_in_c = {nid for nid in region_c['neighbor_ids'] if nid not in region_registry}
+        if deleted_in_c:
+            error_msg = (
+                f"ERROR: Region {c_id} has neighbors that no longer exist in registry: {deleted_in_c}. "
+                f"This indicates a bug - C's neighbor list should have been updated when those regions were merged/deleted."
+            )
+            print(error_msg)
+            raise RuntimeError(error_msg)
+        
+        # Update neighbors of C (except B) to point to B instead
+        for c_neighbor_id in list(region_c['neighbor_ids']):
+            if c_neighbor_id != region_b_id and c_neighbor_id in region_registry:
+                region_c_neighbor = region_registry[c_neighbor_id] 
+                region_c_neighbor['neighbor_ids'].discard(c_id)
+                region_c_neighbor['neighbor_ids'].add(region_b_id)
+                # Safety check: ensure neighbor doesn't have itself as a neighbor
+                if c_neighbor_id in region_c_neighbor['neighbor_ids']:
+                    error_msg = f"ERROR: After updating neighbor {c_neighbor_id} to point to {region_b_id} (recursive merge), neighbor {c_neighbor_id} has itself in neighbor_ids!"
+                    print(error_msg)
+                    raise RuntimeError(error_msg)
+        
+        # Update B's neighbors: union of C's and B's neighbors, minus C and B
+        # This is critical to prevent B from having itself in its neighbor list
+        # Note: We've already verified that C's neighbor list doesn't contain deleted regions
+        region_b['neighbor_ids'] = (region_c['neighbor_ids'] | region_b['neighbor_ids']) - {c_id, region_b_id}
+        # Check for neighbors that no longer exist in the registry (this indicates a bug)
+        deleted_neighbors = {nid for nid in region_b['neighbor_ids'] if nid not in region_registry}
+        if deleted_neighbors:
+            error_msg = (
+                f"ERROR: After recursively merging {c_id} into {region_b_id}, region {region_b_id} has neighbors "
+                f"that no longer exist in registry: {deleted_neighbors}. This indicates a bug in graph maintenance."
+            )
+            print(error_msg)
+            raise RuntimeError(error_msg)
+        # Safety check: ensure B doesn't have itself as a neighbor
+        if region_b_id in region_b['neighbor_ids']:
+            error_msg = f"ERROR: After recursively merging {c_id} into {region_b_id}, region {region_b_id} has itself in neighbor_ids!"
+            print(error_msg)
+            raise RuntimeError(error_msg)
+        
+        region_b['size'] += region_c['size']
+        if region_b['size'] > image_context['max_region_size']:
+            image_context['max_region_size'] = region_b['size']
+        if region_b_id in small_region_ids and region_b['size'] >= min_size:
+            small_region_ids.discard(region_b_id)
+        del region_registry[c_id]
+        
+        same_color_neighbors_to_check.discard(c_id)
+
+
 def merge_small_regions(
     rgba: np.ndarray, 
     min_size: int, 
-    merge_callback: Optional[callable] = None,
-    auto_merge_threshold: float = 0.7,
     merge_weights: dict = None,
     progress_callback: Optional[callable] = None,
     connectivity: int = 8
@@ -351,14 +668,12 @@ def merge_small_regions(
         Input RGBA image
     min_size: int
         Minimum region size threshold
-    merge_callback: callable, optional
-        Callback function for user to choose merge color
-    auto_merge_threshold: float
-        Confidence threshold for automatic merging (0-1)
     merge_weights: dict, optional
-        Weights for different merge factors
+        Weights for different merge factors in scoring
     progress_callback: callable, optional
         Callback function for progress updates (current, total, message)
+    connectivity: int
+        Connectivity for neighbor detection (4 or 8)
         
     Returns
     -------
@@ -386,211 +701,203 @@ def merge_small_regions(
     h, w = rgba.shape[:2]
     image_diagonal = np.sqrt(h*h + w*w)
     
-    # Initial image context (will be updated each pass)
+    # Initial image context (will be updated incrementally)
+    # Calculate initial max_region_size and color_counts from all_regions
+    max_region_size = max([r['size'] for r in all_regions]) if all_regions else 1
+    color_counts = {}
+    for region in all_regions:
+        color = region['color']
+        if color not in color_counts:
+            color_counts[color] = 0
+        color_counts[color] += region['size']
+    
     image_context = {
         'total_pixels': np.sum(alpha > 0),
-        'max_region_size': 1,
+        'max_region_size': max_region_size,
         'max_distance': image_diagonal,
-        'color_counts': {}
+        'color_counts': color_counts
     }
     
-    # Cache for neighbor lookups and region sizes (keyed by color)
-    neighbor_cache: Dict[Tuple[int, int, int], Tuple[List[Tuple[int, int, int]], Dict[Tuple[int, int, int], Tuple[int, Tuple[float, float]]]]] = {}
-    # Structure: {color: (neighbor_colors_list, {neighbor_color: (size, centroid)})}
+    # Build region graph once at the start
+    # Progress range: 15-20 (out of 100 total)
+    def graph_progress_callback(current: int, total: int, message: str) -> None:
+        if progress_callback:
+            # Map 0-100 from graph building to 15-20 in overall progress
+            overall_progress = 15 + int((current / total) * 5)
+            progress_callback(overall_progress, 100, message)
+    
+    region_registry, global_region_labels = _build_region_graph(all_regions, result, connectivity, graph_progress_callback)
+    
+    # Build initial set of small regions (regions below threshold)
+    # This set will be maintained incrementally - regions only get larger or are removed
+    small_region_ids = set()
+    for rid, rdata in region_registry.items():
+        if rdata['size'] < min_size:
+            small_region_ids.add(rid)
     
     # Perform multiple passes to ensure all small regions are handled
     max_passes = 20  # Increased to allow complete cleanup
-    pass_num = 0
-    total_auto_merged = 0
-    total_user_decisions = 0
+    total_merged = 0
     previous_small_count = float('inf')  # Track progress to detect when no more progress is possible
     
-    while pass_num < max_passes:
-        pass_num += 1
-        
-        # Re-analyze regions after each pass (necessary because merges change the image)
-        if progress_callback:
-            progress_callback(20 + (pass_num - 1) * 25, 100, f"Pass {pass_num}: Analyzing regions...")
-        
-        stats = analyze_regions(result, min_size, connectivity)
-        all_regions = stats.get('all_regions', [])
-        
-        # Update image context for this pass
-        image_context['max_region_size'] = max([r['size'] for r in all_regions]) if all_regions else 1
-        image_context['color_counts'] = {}
-        
-        # Build color-to-region mapping for faster lookups
-        color_to_regions: Dict[Tuple[int, int, int], List[dict]] = {}
-        for region in all_regions:
-            color = region['color']
-            if color not in image_context['color_counts']:
-                image_context['color_counts'][color] = 0
-            image_context['color_counts'][color] += region['size']
-            
-            if color not in color_to_regions:
-                color_to_regions[color] = []
-            color_to_regions[color].append(region)
-        
-        # Find small regions (individual connected components)
-        small_regions = [region for region in all_regions if region['size'] < min_size]
-        
-        if not small_regions:
+    for pass_num in range(1, max_passes + 1):
+        if not small_region_ids:
             # No more small regions found
             break
         
         # Check if we're making progress
-        current_small_count = len(small_regions)
+        current_small_count = len(small_region_ids)
         if current_small_count >= previous_small_count:
             # No progress made - stop to prevent infinite loop
             print(f"No progress made in pass {pass_num}, stopping early")
             break
         previous_small_count = current_small_count
-            
+        
         if progress_callback:
-            progress_callback(20 + (pass_num - 1) * 25, 100, f"Pass {pass_num}: Found {len(small_regions)} small regions to process...")
+            progress_callback(20 + (pass_num - 1) * 25, 100, f"Pass {pass_num}: Found {len(small_region_ids)} small regions to process...")
         
-        # Debug: Print region information (only for first few passes)
-        if pass_num <= 3:
-            print(f"Pass {pass_num}: Total regions: {len(all_regions)}, Small regions: {len(small_regions)}")
-            if all_regions:
-                sizes = [r['size'] for r in all_regions]
-                print(f"Region sizes: min={min(sizes)}, max={max(sizes)}, threshold={min_size}")
+        merged_count = 0
+        total_regions = len(small_region_ids)
+        processed_count = 0
         
-        auto_merged = 0
-        user_decisions = 0
-        total_regions = len(small_regions)
-        
-        # Clear neighbor cache at start of each pass (regions may have changed)
-        neighbor_cache.clear()
-        
-        for i, region in enumerate(small_regions):
-            # Update progress
-            if progress_callback:
-                progress = 20 + (pass_num - 1) * 25 + int((i / total_regions) * 20)  # 20-90% for processing
-                progress_callback(progress, 100, f"Pass {pass_num}: Processing region {i+1}/{total_regions}...")
+        # Process regions by popping from the set to avoid iteration issues
+        while small_region_ids:
+            # Pop a region ID from the set
+            region_id = small_region_ids.pop()
             
-            target_color = region['color']
-            labels = region['labels']
-            component_id = region['component_id']
-        
+            # Update progress
+            processed_count += 1
+            if progress_callback:
+                progress = 20 + (pass_num - 1) * 25 + int((processed_count / total_regions) * 20)  # 20-90% for processing
+                progress_callback(progress, 100, f"Pass {pass_num}: Processing region {processed_count}/{total_regions}...")
+            
+            # Get region data from graph
+            if region_id not in region_registry:
+                continue
+            
+            region_data = region_registry[region_id]
+            target_color = region_data['color']
+            region_size = region_data['size']
+            labels = region_data['labels']
+            component_id = region_data['component_id']
+            
             # Create mask for this specific connected component
             component_mask = (labels == component_id) & (alpha > 0)
             
+            # Check if region has no valid pixels in mask
             if not np.any(component_mask):
                 continue
             
-            # Find neighboring colors (use cache if available)
-            if target_color in neighbor_cache:
-                neighbor_colors, neighbor_info = neighbor_cache[target_color]
-            else:
-                neighbor_colors = find_neighboring_colors_for_component(result, component_mask, connectivity)
-                
-                # Build neighbor info cache (size and centroid for each neighbor color)
-                neighbor_info: Dict[Tuple[int, int, int], Tuple[int, Tuple[float, float]]] = {}
-                for neighbor_color in neighbor_colors:
-                    if neighbor_color in color_to_regions:
-                        # Find largest region of this color for size and centroid
-                        neighbor_regions = color_to_regions[neighbor_color]
-                        largest_neighbor = max(neighbor_regions, key=lambda r: r['size'])
-                        neighbor_info[neighbor_color] = (largest_neighbor['size'], largest_neighbor['centroid'])
-                    else:
-                        # Fallback: calculate from mask
-                        neighbor_mask = np.all(rgb == neighbor_color, axis=2) & (alpha > 0)
-                        neighbor_size = np.sum(neighbor_mask)
-                        # Approximate centroid as center of bounding box
-                        if np.any(neighbor_mask):
-                            rows, cols = np.where(neighbor_mask)
-                            centroid = (float(np.mean(cols)), float(np.mean(rows)))
-                        else:
-                            centroid = (0.0, 0.0)
-                        neighbor_info[neighbor_color] = (neighbor_size, centroid)
-                
-                neighbor_cache[target_color] = (neighbor_colors, neighbor_info)
+            # Get neighbors from graph
+            neighbor_ids = region_data['neighbor_ids']
             
-            if not neighbor_colors:
-                # If no neighbors found, try to find the most common color in the image
-                if image_context['color_counts']:
-                    most_common_color = max(image_context['color_counts'].items(), key=lambda x: x[1])[0]
-                    neighbor_colors = [most_common_color]
-                    # Build info for most common color
-                    if most_common_color in color_to_regions:
-                        neighbor_regions = color_to_regions[most_common_color]
-                        largest_neighbor = max(neighbor_regions, key=lambda r: r['size'])
-                        neighbor_info = {most_common_color: (largest_neighbor['size'], largest_neighbor['centroid'])}
-                    else:
-                        neighbor_mask = np.all(rgb == most_common_color, axis=2) & (alpha > 0)
-                        neighbor_size = np.sum(neighbor_mask)
-                        if np.any(neighbor_mask):
-                            rows, cols = np.where(neighbor_mask)
-                            centroid = (float(np.mean(cols)), float(np.mean(rows)))
-                        else:
-                            centroid = (0.0, 0.0)
-                        neighbor_info = {most_common_color: (neighbor_size, centroid)}
-                else:
-                    continue
+            # Safety check: ensure region doesn't have itself as a neighbor
+            if region_id in neighbor_ids:
+                error_msg = f"ERROR: Region {region_id} has itself in neighbor_ids before processing! neighbor_ids: {neighbor_ids}"
+                print(error_msg)
+                raise RuntimeError(error_msg)
             
-            # Calculate scores for each neighbor (using cached info)
-            neighbor_scores = []
-            for neighbor_color in neighbor_colors:
-                neighbor_size, neighbor_centroid = neighbor_info.get(neighbor_color, (1, (0.0, 0.0)))
-                score = calculate_merge_score(
-                    region, 
-                    neighbor_color, 
-                    neighbor_size, 
-                    image_context, 
-                    merge_weights,
-                    neighbor_centroid
+            # Check if region has no neighbors (surrounded by transparent or at edge)
+            if not neighbor_ids:
+                # No neighbors - delete the region
+                alpha[component_mask] = 0
+                merged_count += 1
+                # Update color_counts: remove this region's pixels
+                if target_color in image_context['color_counts']:
+                    image_context['color_counts'][target_color] -= region_size
+                    if image_context['color_counts'][target_color] <= 0:
+                        del image_context['color_counts'][target_color]
+                # Remove from registry and small_region_ids
+                small_region_ids.discard(region_id)
+                del region_registry[region_id]
+                continue
+            
+            # Get neighbor region data and group by color for scoring
+            # Create a copy to avoid "set changed size during iteration" error
+            neighbor_by_color: Dict[Tuple[int, int, int], List[Tuple[int, dict]]] = {}
+            
+            for neighbor_id in list(neighbor_ids):
+                if neighbor_id not in region_registry:
+                    # ERROR: Neighbor was removed from registry but is still in neighbor_ids set
+                    # This indicates a bug in the graph maintenance - _merge_regions_in_graph should
+                    # have updated our neighbor_ids when the neighbor was merged.
+                    error_msg = (
+                        f"Graph consistency error: Region {region_id} has neighbor {neighbor_id} "
+                        f"in neighbor_ids set, but {neighbor_id} is not in registry. "
+                        f"This indicates a bug in the merge function - it should have updated "
+                        f"neighbor_ids when the neighbor was merged."
+                    )
+                    print(f"ERROR: {error_msg}")
+                    raise RuntimeError(error_msg)
+                neighbor_data = region_registry[neighbor_id]
+                neighbor_color = neighbor_data['color']
+                if neighbor_color not in neighbor_by_color:
+                    neighbor_by_color[neighbor_color] = []
+                neighbor_by_color[neighbor_color].append((neighbor_id, neighbor_data))
+            
+            # At this point, neighbor_by_color should not be empty because:
+            # 1. We already checked if neighbor_ids is empty (line 664) and handled that case
+            # 2. We raise an error if any neighbor_id is invalid (line 695)
+            # 3. So if we reach here, all neighbor_ids are valid and neighbor_by_color has entries
+            if not neighbor_by_color:
+                error_msg = (
+                    f"Graph consistency error: Region {region_id} has neighbors in neighbor_ids set, "
+                    f"but neighbor_by_color is empty after processing. This should not be possible."
                 )
-                neighbor_scores.append((neighbor_color, score))
+                print(f"ERROR: {error_msg}")
+                raise RuntimeError(error_msg)
             
-            # Sort by score (highest first)
-            neighbor_scores.sort(key=lambda x: x[1], reverse=True)
-            best_color, best_score = neighbor_scores[0]
-            
-            # Decide whether to auto-merge or ask user
-            should_auto_merge = (len(neighbor_colors) == 1 or 
-                               (len(neighbor_colors) > 1 and best_score >= auto_merge_threshold))
-            
-            if should_auto_merge:
-                # Auto-merge
-                merge_rgb = best_color
-                auto_merged += 1
+            # Determine which neighbor to merge to
+            if len(neighbor_by_color) == 1:
+                # Single neighbor color - merge to that color
+                # Since all neighbors have the same color, it doesn't matter which one we pick
+                neighbor_color = list(neighbor_by_color.keys())[0]
+                neighbor_list = neighbor_by_color[neighbor_color]
+                best_neighbor_id, best_neighbor = neighbor_list[0]
             else:
-                # Ask user for decision
-                if merge_callback:
-                    from PySide6.QtGui import QColor
-                    target_qcolor = QColor(target_color[0], target_color[1], target_color[2])
-                    neighbor_qcolors = [QColor(c[0], c[1], c[2]) for c in neighbor_colors]
-                    
-                    # Get bounding box for this specific component
-                    bbox = get_component_bounding_box(component_mask, buffer=10)
-                    
-                    merge_color = merge_callback(target_qcolor, neighbor_qcolors, result, bbox)
-                    if merge_color is None:
-                        # User cancelled - return None to indicate entire operation should be cancelled
-                        return None
-                    
-                    merge_rgb = (merge_color.red(), merge_color.green(), merge_color.blue())
-                    user_decisions += 1
-                else:
-                    # Fallback to best score
-                    merge_rgb = best_color
-                    auto_merged += 1
+                # Multiple neighbor colors - use scores to select the best one
+                neighbor_scores = []
+                for neighbor_color, neighbor_list in neighbor_by_color.items():
+                    # neighbor_list is List[Tuple[int, dict]] - find largest by size
+                    best_neighbor_id_for_color, best_neighbor = max(neighbor_list, key=lambda x: x[1]['size'])
+                    score = calculate_merge_score(
+                        region_data,
+                        neighbor_color,
+                        best_neighbor['size'],
+                        image_context,
+                        merge_weights,
+                        best_neighbor['centroid']
+                    )
+                    neighbor_scores.append((neighbor_color, best_neighbor_id_for_color, best_neighbor, score))
+                
+                # Check if we have any valid scores
+                if not neighbor_scores:
+                    continue
+                
+                # Sort by score (highest first) and select best
+                neighbor_scores.sort(key=lambda x: x[3], reverse=True)
+                best_color, best_neighbor_id, best_neighbor, best_score = neighbor_scores[0]
             
-            # Apply the merge to this specific component
-            rgb[component_mask] = merge_rgb
+            if best_neighbor_id is None:
+                continue
+            
+            # Merge region into best neighbor
+            _merge_regions_in_graph(region_registry, region_id, best_neighbor_id, result, small_region_ids, min_size, image_context)
+            merged_count += 1
+            
+            # Update alpha reference after merge (image may have changed)
+            alpha = result[:, :, 3]
         
         # Update totals for this pass
-        total_auto_merged += auto_merged
-        total_user_decisions += user_decisions
+        total_merged += merged_count
         
         if progress_callback:
-            progress_callback(20 + pass_num * 25, 100, f"Pass {pass_num} complete: {auto_merged} auto-merged, {user_decisions} user decisions")
+            progress_callback(20 + pass_num * 25, 100, f"Pass {pass_num} complete: {merged_count} regions merged")
     
     if progress_callback:
-        progress_callback(100, 100, f"Complete: {total_auto_merged} auto-merged, {total_user_decisions} user decisions in {pass_num} passes")
+        progress_callback(100, 100, f"Complete: {total_merged} regions merged in {pass_num} passes")
     
-    print(f"Region cleanup complete: {total_auto_merged} auto-merged, {total_user_decisions} user decisions in {pass_num} passes")
+    print(f"Region cleanup complete: {total_merged} regions merged in {pass_num} passes")
     
     # Ensure the result is contiguous
     return np.ascontiguousarray(result)
@@ -713,40 +1020,6 @@ def _manual_flood_fill(
     return result
 
 
-def get_component_bounding_box(component_mask: np.ndarray, buffer: int = 10) -> Optional[Tuple[int, int, int, int]]:
-    """
-    Get the bounding box of a specific connected component with a buffer around it.
-    
-    Parameters
-    ----------
-    component_mask: np.ndarray
-        Boolean mask for the specific component
-    buffer: int
-        Buffer size in pixels around the region
-        
-    Returns
-    -------
-    Optional[Tuple[int, int, int, int]]
-        Bounding box as (x, y, width, height) or None if region not found
-    """
-    if not np.any(component_mask):
-        return None
-    
-    # Find bounding box
-    rows = np.any(component_mask, axis=1)
-    cols = np.any(component_mask, axis=0)
-    
-    y_min, y_max = np.where(rows)[0][[0, -1]]
-    x_min, x_max = np.where(cols)[0][[0, -1]]
-    
-    # Add buffer
-    h, w = component_mask.shape
-    x_min = max(0, x_min - buffer)
-    y_min = max(0, y_min - buffer)
-    x_max = min(w, x_max + buffer + 1)
-    y_max = min(h, y_max + buffer + 1)
-    
-    return (x_min, y_min, x_max - x_min, y_max - y_min)
 
 
 def get_region_boundaries(rgba: np.ndarray, connectivity: int = 8) -> np.ndarray:
