@@ -394,6 +394,7 @@ class BgToolsPanel(BaseStep):
 		self.btn_apply_crop.clicked.connect(self._background_removal_view.apply_crop)
 		self._handle_mode_change()
 		self._background_removal_view.setVisible(True)
+		self._background_removal_view.raise_()  # Ensure it's on top
 		self._background_removal_view.show_overlays()
 	
 	def _on_close(self):

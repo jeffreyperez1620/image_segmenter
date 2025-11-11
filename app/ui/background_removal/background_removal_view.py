@@ -67,9 +67,8 @@ class BackgroundRemovalView(QWidget):
         # Image state
         self._image_size: Optional[tuple] = None
 		
-		# Position the background removal view over the image view
-        self.setGeometry(0, 0, self._image_view.width(), self._image_view.height())
-        self.raise_()
+		# Don't set geometry here - it will be set when the tab opens
+        # The ImageView might not have its final size yet during initialization
         
     def set_image_size(self, width: int, height: int):
         """Set the size of the image for mask operations."""
@@ -103,9 +102,13 @@ class BackgroundRemovalView(QWidget):
     def resizeEvent(self, event):
         """Handle resize events to keep the overlay properly sized."""
         super().resizeEvent(event)
-        # The overlay should always match the parent's size
+        # The overlay should always match the parent's (viewport's) size
         if self.parent():
             self.setGeometry(0, 0, self.parent().width(), self.parent().height())
+        elif self._image_view:
+            # Fallback to image view size
+            viewport = self._image_view._view.viewport()
+            self.setGeometry(0, 0, viewport.width(), viewport.height())
         
     def set_brush_size(self, size: int):
         """Set the brush size for painting."""
@@ -242,6 +245,7 @@ class BackgroundRemovalView(QWidget):
         
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         """Handle mouse move events."""
+        
         # Only handle left mouse button events for painting/cropping
         if event.buttons() & Qt.LeftButton:
             if self._mode in ["include", "exclude", "erase"] and self._painting:
@@ -278,6 +282,7 @@ class BackgroundRemovalView(QWidget):
         
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         """Handle mouse release events."""
+        
         # Only handle left mouse button events for painting/cropping
         if event.button() == Qt.LeftButton:
             if self._mode in ["include", "exclude", "erase"] and self._painting:

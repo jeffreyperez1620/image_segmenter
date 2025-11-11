@@ -32,9 +32,8 @@ class EyedropperView(QWidget):
         # Hide the system cursor when this widget is active
         self.setCursor(Qt.BlankCursor)
         
-        # Position the eyedropper view over the image view
-        self.setGeometry(0, 0, self._image_view.width(), self._image_view.height())
-        self.raise_()
+        # Don't set geometry here - it will be set when activated
+        # The ImageView might not have its final size yet during initialization
         
         # Initially hidden
         self.hide()
@@ -43,7 +42,12 @@ class EyedropperView(QWidget):
         """Activate or deactivate the eyedropper."""
         self._active = active
         if active:
+            # Update geometry to match the viewport size
+            viewport = self._image_view._view.viewport()
+            if viewport:
+                self.setGeometry(0, 0, viewport.width(), viewport.height())
             self.show()
+            self.raise_()  # Ensure it's on top
             # Hide the system cursor - we'll draw our own crosshair
             self._image_view._view.viewport().setCursor(Qt.BlankCursor)
         else:
@@ -202,6 +206,10 @@ class EyedropperView(QWidget):
     def resizeEvent(self, event) -> None:
         """Handle resize events."""
         super().resizeEvent(event)
-        # Ensure the eyedropper view covers the entire image view
-        if self._image_view is not None:
-            self.setGeometry(0, 0, self._image_view.width(), self._image_view.height())
+        # Ensure the eyedropper view covers the entire viewport
+        if self.parent():
+            self.setGeometry(0, 0, self.parent().width(), self.parent().height())
+        elif self._image_view:
+            # Fallback to viewport size
+            viewport = self._image_view._view.viewport()
+            self.setGeometry(0, 0, viewport.width(), viewport.height())

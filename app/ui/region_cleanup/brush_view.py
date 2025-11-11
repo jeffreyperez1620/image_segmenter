@@ -34,8 +34,8 @@ class BrushView(QWidget):
         # Hide the system cursor when this widget is active
         self.setCursor(Qt.BlankCursor)
         
-        self.setGeometry(0, 0, self._image_view.width(), self._image_view.height())
-        self.raise_()
+        # Don't set geometry here - it will be set when activated
+        # The ImageView might not have its final size yet during initialization
         
         self.hide()
     
@@ -43,9 +43,12 @@ class BrushView(QWidget):
         """Activate or deactivate the brush view."""
         self._active = active
         if active:
-            # Update geometry before showing to ensure it covers the full area
-            self._update_geometry()
+            # Update geometry to match the viewport size
+            viewport = self._image_view._view.viewport()
+            if viewport:
+                self.setGeometry(0, 0, viewport.width(), viewport.height())
             self.show()
+            self.raise_()  # Ensure it's on top
             # Hide the system cursor and set a custom cursor
             self._image_view._view.viewport().setCursor(Qt.BlankCursor)
         else:
@@ -57,15 +60,13 @@ class BrushView(QWidget):
             self.update()
     
     def _update_geometry(self) -> None:
-        """Update the widget geometry to match the image view."""
-        if self._image_view is not None and self.parent() is not None:
-            # Use parent's size to ensure we cover the full area
-            parent_size = self.parent().size()
-            self.setGeometry(0, 0, parent_size.width(), parent_size.height())
-        elif self._image_view is not None:
-            # Fallback to image view size if no parent
-            view_size = self._image_view.size()
-            self.setGeometry(0, 0, view_size.width(), view_size.height())
+        """Update the widget geometry to match the viewport."""
+        if self.parent():
+            self.setGeometry(0, 0, self.parent().width(), self.parent().height())
+        elif self._image_view:
+            # Fallback to viewport size
+            viewport = self._image_view._view.viewport()
+            self.setGeometry(0, 0, viewport.width(), viewport.height())
     
     def set_brush_color(self, color: QColor) -> None:
         """Set the color to use for brush painting."""

@@ -9,7 +9,7 @@ import numpy as np
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, 
+    QScrollArea, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, 
     QGroupBox, QTableWidget, QTableWidgetItem, QHeaderView,
     QMessageBox, QSizePolicy
 )
@@ -64,6 +64,10 @@ class ArrangeRegionsPanel(BaseStep):
         palette_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         palette_layout = QVBoxLayout(palette_group)
         
+        self.palette_scroll = QScrollArea()
+        self.palette_scroll.setWidgetResizable(True)
+        self.palette_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
         self.palette_table = QTableWidget()
         self.palette_table.setColumnCount(2)
         self.palette_table.setHorizontalHeaderLabels(["Color", "Info"])
@@ -73,11 +77,12 @@ class ArrangeRegionsPanel(BaseStep):
         self.palette_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.palette_table.setSelectionMode(QTableWidget.SingleSelection)
         
-        palette_layout.addWidget(self.palette_table)
+        self.palette_scroll.setWidget(self.palette_table)
+        palette_layout.addWidget(self.palette_scroll)
         layout.addWidget(palette_group)
         
         # Add stretch at the end
-        layout.addStretch(1)
+        layout.addStretch()
         
         # Set the main widget
         self.set_main_widget(main_widget)

@@ -57,11 +57,8 @@ class RegionOverlayView(QWidget):
         # Active state (whether overlay is enabled)
         self._active = False
         
-        # Position the overlay view over the image view
-        if self._image_view:
-            self.setGeometry(0, 0, self._image_view.width(), self._image_view.height())
-            self.raise_()
-            self.show()  # Make sure the overlay is visible
+        # Don't set geometry here - it will be set when activated
+        # The ImageView might not have its final size yet during initialization
     
     def set_regions(self, color_regions: Optional[ColorRegions]) -> None:
         """Set the regions to display."""
@@ -398,7 +395,14 @@ class RegionOverlayView(QWidget):
     def set_active(self, active: bool) -> None:
         """Set whether the overlay is active."""
         self._active = active
-        if not active:
+        if active:
+            # Update geometry to match the viewport size
+            viewport = self._image_view._view.viewport()
+            if viewport:
+                self.setGeometry(0, 0, viewport.width(), viewport.height())
+            self.show()
+            self.raise_()  # Ensure it's on top
+        else:
             # Clear active item when deactivating
             if self._active_item:
                 self._active_item.set_active(False)
@@ -463,6 +467,11 @@ class RegionOverlayView(QWidget):
     
     def resizeEvent(self, event) -> None:
         """Handle resize events to keep the overlay properly sized."""
-        if self._image_view:
-            self.setGeometry(0, 0, self._image_view.width(), self._image_view.height())
         super().resizeEvent(event)
+        # The overlay should always match the parent's (viewport's) size
+        if self.parent():
+            self.setGeometry(0, 0, self.parent().width(), self.parent().height())
+        elif self._image_view:
+            # Fallback to viewport size
+            viewport = self._image_view._view.viewport()
+            self.setGeometry(0, 0, viewport.width(), viewport.height())

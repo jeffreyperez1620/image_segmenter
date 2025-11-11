@@ -173,7 +173,6 @@ class ColorProcessingPanel(BaseStep):
         self.palette_table.setSelectionMode(QTableWidget.SingleSelection)
         self.palette_table.setFocusPolicy(Qt.StrongFocus)  # Ensure table can receive focus
         
-        
         self.palette_scroll.setWidget(self.palette_table)
         palette_layout.addWidget(self.palette_scroll)
         

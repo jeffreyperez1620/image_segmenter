@@ -36,7 +36,7 @@ from ui.base_step import BaseStep
 from model import AppState
 from utils.qt_image import qimage_to_numpy_bgr, composite_foreground_over_transparent, numpy_rgba_to_qimage
 from processing.color_simplify import simplify_colors_adaptive, get_color_statistics
-from processing.region_cleanup import analyze_regions, merge_small_regions, flood_fill_region, get_region_boundaries
+from processing.region_cleanup import analyze_regions, merge_small_regions, flood_fill_region
 
 
 class MainWindow(QMainWindow):
@@ -353,10 +353,12 @@ class MainWindow(QMainWindow):
 	
 	def _on_image_view_resize(self, event):
 		"""Handle image view resize events."""
-		# Update the background removal view size to match
-		self._bg_panel._background_removal_view.setGeometry(0, 0, self._image_view.width(), self._image_view.height())
+		# Update the background removal view size to match the viewport
+		viewport = self._image_view._view.viewport()
+		if viewport and self._bg_panel._background_removal_view:
+			self._bg_panel._background_removal_view.setGeometry(0, 0, viewport.width(), viewport.height())
 		# Update arrange regions overlay view
-		if self._arrange_regions_panel._region_overlay_view:
-			self._arrange_regions_panel._region_overlay_view.setGeometry(0, 0, self._image_view.width(), self._image_view.height())
+		if viewport and self._arrange_regions_panel._region_overlay_view:
+			self._arrange_regions_panel._region_overlay_view.setGeometry(0, 0, viewport.width(), viewport.height())
 		# Call the original resize event
 		QWidget.resizeEvent(self._image_view, event)
