@@ -9,6 +9,7 @@ import numpy as np
 import cv2 as cv
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
+from scipy.interpolate import splprep, splev
 from processing.arrange_regions import RegionData
 
 
@@ -293,7 +294,8 @@ def export_regions_to_svg(
     margin_width: float,
     margin_height: float,
     units: str,
-    output_path: str
+    output_path: str,
+    enable_smoothing: bool = False
 ) -> bool:
     """
     Export regions to SVG format as outlined contours.
@@ -314,6 +316,8 @@ def export_regions_to_svg(
         Units of measurement ("in", "cm", or "mm")
     output_path: str
         Path to save the SVG file
+    enable_smoothing: bool
+        If True, apply contour smoothing using cv2.approxPolyDP()
         
     Returns
     -------
@@ -429,6 +433,45 @@ def export_regions_to_svg(
         for contour in contours:
             if len(contour) < 3:
                 continue
+            
+            # Apply smoothing if enabled
+            if enable_smoothing:
+                # First, simplify the contour to reduce points
+                perimeter = cv.arcLength(contour, True)
+                epsilon = 0.01 * perimeter
+                contour = cv.approxPolyDP(contour, epsilon, True)
+                if len(contour) < 3:
+                    continue
+                
+                # Reshape contour for spline interpolation
+                contour_reshaped = contour.reshape(-1, 2)
+                
+                # Extract x and y coordinates (use different variable names to avoid collision)
+                contour_x = contour_reshaped[:, 0].astype(np.float64)
+                contour_y = contour_reshaped[:, 1].astype(np.float64)
+                
+                # Close the contour by adding the first point at the end if not already closed
+                if not np.array_equal(contour_reshaped[0], contour_reshaped[-1]):
+                    contour_x = np.append(contour_x, contour_x[0])
+                    contour_y = np.append(contour_y, contour_y[0])
+                
+                # Fit B-spline to the contour
+                # s parameter controls smoothness: smaller = closer to original, larger = smoother
+                # per=1 means periodic (closed contour)
+                try:
+                    tck, u = splprep([contour_x, contour_y], s=len(contour) * 0.5, per=1)
+                    
+                    # Generate smoothed points
+                    # Use fewer points than original for smoother result
+                    num_points = max(10, min(len(contour), 50))  # Between 10 and 50 points
+                    u_new = np.linspace(0, 1, num_points)
+                    x_new, y_new = splev(u_new, tck, der=0)
+                    
+                    # Convert back to contour format
+                    contour = np.array([[int(round(xi)), int(round(yi))] for xi, yi in zip(x_new, y_new)], dtype=np.int32).reshape(-1, 1, 2)
+                except Exception:
+                    # If spline fitting fails, use the simplified contour
+                    pass
             
             # Convert contour points to numpy array (shape: N, 1, 2)
             points = contour.reshape(-1, 2).astype(np.float32)

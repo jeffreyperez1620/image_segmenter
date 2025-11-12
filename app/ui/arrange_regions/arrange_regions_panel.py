@@ -49,6 +49,7 @@ class ArrangeRegionsPanel(BaseStep):
         self._aspect_ratio = 1.0
         self._export_margin_width = 0.0
         self._export_margin_height = 0.0
+        self._export_enable_smoothing = False
         
         self._init_ui()
         
@@ -130,6 +131,15 @@ class ArrangeRegionsPanel(BaseStep):
         self._edit_margin_height.setPlaceholderText("Margin Height")
         margin_layout.addWidget(self._edit_margin_height)
         export_layout.addLayout(margin_layout)
+        
+        # Fourth row: Enable Smoothing checkbox
+        smoothing_layout = QHBoxLayout()
+        smoothing_layout.addWidget(QLabel("Enable Smoothing:"))
+        self._chk_enable_smoothing = QCheckBox()
+        self._chk_enable_smoothing.setChecked(False)
+        smoothing_layout.addWidget(self._chk_enable_smoothing)
+        smoothing_layout.addStretch()
+        export_layout.addLayout(smoothing_layout)
         
         # Export buttons at the bottom
         export_buttons_layout = QHBoxLayout()
@@ -649,6 +659,7 @@ class ArrangeRegionsPanel(BaseStep):
             margin_width_value = float(self._edit_margin_width.text()) if self._edit_margin_width.text() else 0.0
             margin_height_value = float(self._edit_margin_height.text()) if self._edit_margin_height.text() else 0.0
             units = self._combo_units.currentText()
+            enable_smoothing = self._chk_enable_smoothing.isChecked()
         except ValueError:
             QMessageBox.warning(self, "Export", "Please enter valid numeric values for dimensions and margins.")
             return
@@ -725,7 +736,8 @@ class ArrangeRegionsPanel(BaseStep):
             margin_width_value,
             margin_height_value,
             units,
-            file_path
+            file_path,
+            enable_smoothing
         )
         
         if success:
@@ -746,6 +758,7 @@ class ArrangeRegionsPanel(BaseStep):
             margin_width_value = float(self._edit_margin_width.text()) if self._edit_margin_width.text() else 0.0
             margin_height_value = float(self._edit_margin_height.text()) if self._edit_margin_height.text() else 0.0
             units = self._combo_units.currentText()
+            enable_smoothing = self._chk_enable_smoothing.isChecked()
         except ValueError:
             QMessageBox.warning(self, "Export", "Please enter valid numeric values for dimensions and margins.")
             return
@@ -831,7 +844,8 @@ class ArrangeRegionsPanel(BaseStep):
             margin_width_value,
             margin_height_value,
             units,
-            file_path
+            file_path,
+            enable_smoothing
         )
         
         if success:
