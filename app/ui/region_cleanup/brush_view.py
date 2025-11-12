@@ -171,9 +171,10 @@ class BrushView(BaseOverlayView):
                 if dx * dx + dy * dy <= radius * radius:
                     px, py = x + dx, y + dy
                     if 0 <= px < working_image.shape[1] and 0 <= py < working_image.shape[0]:
-                        # Only paint on non-transparent pixels
-                        if working_image.shape[2] >= 4 and working_image[py, px, 3] > 0:
+                        # Paint on both transparent and non-transparent pixels
+                        if working_image.shape[2] >= 4:
                             working_image[py, px, :3] = brush_color_rgb
+                            working_image[py, px, 3] = 255  # Make fully opaque
         
         # Emit signal with modified image and stroke start flag
         is_stroke_start = self._stroke_started
@@ -220,9 +221,9 @@ class BrushView(BaseOverlayView):
                         px, py = x0 + dx_brush, y0 + dy_brush
                         if (0 <= px < working_image.shape[1] and 
                             0 <= py < working_image.shape[0] and
-                            working_image.shape[2] >= 4 and 
-                            working_image[py, px, 3] > 0):
+                            working_image.shape[2] >= 4):
                             working_image[py, px, :3] = brush_color_rgb
+                            working_image[py, px, 3] = 255  # Make fully opaque
             
             if x0 == x1 and y0 == y1:
                 break

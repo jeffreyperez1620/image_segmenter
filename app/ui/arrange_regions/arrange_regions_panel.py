@@ -11,7 +11,7 @@ from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtWidgets import (
     QScrollArea, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, 
     QGroupBox, QTableWidget, QTableWidgetItem, QHeaderView,
-    QMessageBox, QSizePolicy
+    QMessageBox, QSizePolicy, QCheckBox, QComboBox, QLineEdit, QFormLayout, QFileDialog
 )
 
 from model import AppState
@@ -40,6 +40,15 @@ class ArrangeRegionsPanel(BaseStep):
         
         # Region overlay view
         self._region_overlay_view: Optional[RegionOverlayView] = None
+        
+        # Export settings
+        self._lock_aspect_ratio = True
+        self._export_units = "in"
+        self._export_width_pixels = 0
+        self._export_height_pixels = 0
+        self._aspect_ratio = 1.0
+        self._export_margin_width = 0.0
+        self._export_margin_height = 0.0
         
         self._init_ui()
         
@@ -80,6 +89,57 @@ class ArrangeRegionsPanel(BaseStep):
         self.palette_scroll.setWidget(self.palette_table)
         palette_layout.addWidget(self.palette_scroll)
         layout.addWidget(palette_group)
+        
+        # Export to SVG section
+        export_group = QGroupBox("Export to SVG")
+        export_layout = QVBoxLayout(export_group)
+        
+        # First row: Lock Aspect Ratio checkbox and Units combo box
+        aspect_units_layout = QHBoxLayout()
+        aspect_units_layout.addWidget(QLabel("Lock Aspect Ratio:"))
+        self._chk_lock_aspect = QCheckBox()
+        self._chk_lock_aspect.setChecked(True)
+        aspect_units_layout.addWidget(self._chk_lock_aspect)
+        aspect_units_layout.addStretch()
+        aspect_units_layout.addWidget(QLabel("Units:"))
+        self._combo_units = QComboBox()
+        self._combo_units.addItems(["in", "cm", "mm"])
+        aspect_units_layout.addWidget(self._combo_units)
+        export_layout.addLayout(aspect_units_layout)
+        
+        # Second row: Width and Height inputs
+        dimensions_layout = QHBoxLayout()
+        dimensions_layout.addWidget(QLabel("Width:"))
+        self._edit_width = QLineEdit()
+        self._edit_width.setPlaceholderText("Width")
+        dimensions_layout.addWidget(self._edit_width)
+        dimensions_layout.addWidget(QLabel("Height:"))
+        self._edit_height = QLineEdit()
+        self._edit_height.setPlaceholderText("Height")
+        dimensions_layout.addWidget(self._edit_height)
+        export_layout.addLayout(dimensions_layout)
+        
+        # Third row: Margin Width and Margin Height inputs
+        margin_layout = QHBoxLayout()
+        margin_layout.addWidget(QLabel("Margin Width:"))
+        self._edit_margin_width = QLineEdit()
+        self._edit_margin_width.setPlaceholderText("Margin Width")
+        margin_layout.addWidget(self._edit_margin_width)
+        margin_layout.addWidget(QLabel("Margin Height:"))
+        self._edit_margin_height = QLineEdit()
+        self._edit_margin_height.setPlaceholderText("Margin Height")
+        margin_layout.addWidget(self._edit_margin_height)
+        export_layout.addLayout(margin_layout)
+        
+        # Export buttons at the bottom
+        export_buttons_layout = QHBoxLayout()
+        self._btn_export_selected = QPushButton("Export Selected")
+        self._btn_export_all = QPushButton("Export All")
+        export_buttons_layout.addWidget(self._btn_export_selected)
+        export_buttons_layout.addWidget(self._btn_export_all)
+        export_layout.addLayout(export_buttons_layout)
+        
+        layout.addWidget(export_group)
         
         # Add stretch at the end
         layout.addStretch()
@@ -290,6 +350,19 @@ class ArrangeRegionsPanel(BaseStep):
         self._chk_show_base.toggled.disconnect()
         self._chk_show_base.toggled.connect(self._update_region_display)
         
+        # Calculate bounding box of non-transparent pixels
+        self._calculate_export_dimensions()
+        
+        # Connect export UI signals
+        self._chk_lock_aspect.toggled.connect(self._on_lock_aspect_toggled)
+        self._edit_width.textChanged.connect(self._on_width_changed)
+        self._edit_height.textChanged.connect(self._on_height_changed)
+        self._edit_margin_width.textChanged.connect(self._on_margin_width_changed)
+        self._edit_margin_height.textChanged.connect(self._on_margin_height_changed)
+        self._combo_units.currentTextChanged.connect(self._on_units_changed)
+        self._btn_export_selected.clicked.connect(self._on_export_selected)
+        self._btn_export_all.clicked.connect(self._on_export_all)
+        
         # Initialize display
         self._update_region_display()
         
@@ -337,3 +410,431 @@ class ArrangeRegionsPanel(BaseStep):
             unique_colors = np.unique(pixels, axis=0)
             return [tuple(int(c) for c in color) for color in unique_colors]
         return []
+    
+    def _calculate_export_dimensions(self) -> None:
+        """Calculate the bounding box of non-transparent pixels and set export dimensions."""
+        base_image = self._app_state.base_image
+        if base_image is None:
+            self._export_width_pixels = 0
+            self._export_height_pixels = 0
+            self._aspect_ratio = 1.0
+            return
+        
+        # Get alpha channel
+        if base_image.shape[2] >= 4:
+            alpha = base_image[:, :, 3]
+        else:
+            # No alpha channel, use full image
+            self._export_width_pixels = base_image.shape[1]
+            self._export_height_pixels = base_image.shape[0]
+            self._aspect_ratio = self._export_width_pixels / self._export_height_pixels if self._export_height_pixels > 0 else 1.0
+            self._update_export_fields()
+            return
+        
+        # Find non-transparent pixels
+        non_transparent = alpha > 0
+        
+        if not np.any(non_transparent):
+            # All transparent, use full image dimensions
+            self._export_width_pixels = base_image.shape[1]
+            self._export_height_pixels = base_image.shape[0]
+            self._aspect_ratio = 1.0
+            self._update_export_fields()
+            return
+        
+        # Find bounding box of non-transparent pixels
+        rows = np.any(non_transparent, axis=1)
+        cols = np.any(non_transparent, axis=0)
+        
+        if not np.any(rows) or not np.any(cols):
+            # No non-transparent pixels found
+            self._export_width_pixels = base_image.shape[1]
+            self._export_height_pixels = base_image.shape[0]
+            self._aspect_ratio = 1.0
+            self._update_export_fields()
+            return
+        
+        y_min = np.argmax(rows)
+        y_max = len(rows) - np.argmax(rows[::-1])
+        x_min = np.argmax(cols)
+        x_max = len(cols) - np.argmax(cols[::-1])
+        
+        # Calculate dimensions
+        self._export_width_pixels = x_max - x_min
+        self._export_height_pixels = y_max - y_min
+        self._aspect_ratio = self._export_width_pixels / self._export_height_pixels if self._export_height_pixels > 0 else 1.0
+        
+        self._update_export_fields()
+    
+    def _update_export_fields(self) -> None:
+        """Update the width and height fields with current pixel dimensions converted to selected units."""
+        if self._export_width_pixels == 0 or self._export_height_pixels == 0:
+            self._edit_width.clear()
+            self._edit_height.clear()
+            return
+        
+        # Convert pixels to selected units (assuming 96 DPI for now)
+        dpi = 96.0
+        pixels_per_inch = dpi
+        
+        # Convert to inches first
+        width_inches = self._export_width_pixels / pixels_per_inch
+        height_inches = self._export_height_pixels / pixels_per_inch
+        
+        # Convert to selected unit
+        unit = self._combo_units.currentText()
+        if unit == "cm":
+            width_value = width_inches * 2.54
+            height_value = height_inches * 2.54
+        elif unit == "mm":
+            width_value = width_inches * 25.4
+            height_value = height_inches * 25.4
+        else:  # "in"
+            width_value = width_inches
+            height_value = height_inches
+        
+        # Update fields (block signals to avoid recursion)
+        self._edit_width.blockSignals(True)
+        self._edit_height.blockSignals(True)
+        self._edit_width.setText(f"{width_value:.2f}")
+        self._edit_height.setText(f"{height_value:.2f}")
+        self._edit_width.blockSignals(False)
+        self._edit_height.blockSignals(False)
+    
+    def _on_lock_aspect_toggled(self, checked: bool) -> None:
+        """Handle lock aspect ratio checkbox toggle."""
+        self._lock_aspect_ratio = checked
+    
+    def _on_units_changed(self, unit: str) -> None:
+        """Handle units combo box change."""
+        self._export_units = unit
+        self._update_export_fields()
+    
+    def _on_width_changed(self, text: str) -> None:
+        """Handle width input change."""
+        if not text:
+            return
+        
+        try:
+            width_value = float(text)
+            if width_value <= 0:
+                return
+            
+            # Convert to pixels
+            dpi = 96.0
+            pixels_per_inch = dpi
+            unit = self._combo_units.currentText()
+            
+            if unit == "cm":
+                width_inches = width_value / 2.54
+            elif unit == "mm":
+                width_inches = width_value / 25.4
+            else:  # "in"
+                width_inches = width_value
+            
+            new_width_pixels = width_inches * pixels_per_inch
+            
+            if self._lock_aspect_ratio:
+                # Calculate new height based on aspect ratio
+                new_height_pixels = new_width_pixels / self._aspect_ratio if self._aspect_ratio > 0 else 0
+                self._export_height_pixels = new_height_pixels
+                
+                # Update height field
+                height_inches = new_height_pixels / pixels_per_inch
+                if unit == "cm":
+                    height_value = height_inches * 2.54
+                elif unit == "mm":
+                    height_value = height_inches * 25.4
+                else:  # "in"
+                    height_value = height_inches
+                
+                self._edit_height.blockSignals(True)
+                self._edit_height.setText(f"{height_value:.2f}")
+                self._edit_height.blockSignals(False)
+            else:
+                self._export_width_pixels = new_width_pixels
+        except ValueError:
+            pass
+    
+    def _on_height_changed(self, text: str) -> None:
+        """Handle height input change."""
+        if not text:
+            return
+        
+        try:
+            height_value = float(text)
+            if height_value <= 0:
+                return
+            
+            # Convert to pixels
+            dpi = 96.0
+            pixels_per_inch = dpi
+            unit = self._combo_units.currentText()
+            
+            if unit == "cm":
+                height_inches = height_value / 2.54
+            elif unit == "mm":
+                height_inches = height_value / 25.4
+            else:  # "in"
+                height_inches = height_value
+            
+            new_height_pixels = height_inches * pixels_per_inch
+            
+            if self._lock_aspect_ratio:
+                # Calculate new width based on aspect ratio
+                new_width_pixels = new_height_pixels * self._aspect_ratio
+                self._export_width_pixels = new_width_pixels
+                
+                # Update width field
+                width_inches = new_width_pixels / pixels_per_inch
+                if unit == "cm":
+                    width_value = width_inches * 2.54
+                elif unit == "mm":
+                    width_value = width_inches * 25.4
+                else:  # "in"
+                    width_value = width_inches
+                
+                self._edit_width.blockSignals(True)
+                self._edit_width.setText(f"{width_value:.2f}")
+                self._edit_width.blockSignals(False)
+            else:
+                self._export_height_pixels = new_height_pixels
+        except ValueError:
+            pass
+    
+    def _on_margin_width_changed(self, text: str) -> None:
+        """Handle margin width input change."""
+        if not text:
+            self._export_margin_width = 0.0
+            return
+        
+        try:
+            margin_value = float(text)
+            if margin_value < 0:
+                return
+            self._export_margin_width = margin_value
+        except ValueError:
+            pass
+    
+    def _on_margin_height_changed(self, text: str) -> None:
+        """Handle margin height input change."""
+        if not text:
+            self._export_margin_height = 0.0
+            return
+        
+        try:
+            margin_value = float(text)
+            if margin_value < 0:
+                return
+            self._export_margin_height = margin_value
+        except ValueError:
+            pass
+    
+    def _on_export_selected(self) -> None:
+        """Handle Export Selected button click."""
+        if self._selected_color is None:
+            QMessageBox.warning(self, "Export", "Please select a color to export.")
+            return
+        
+        # Get the selected color's regions
+        color_regions = self._region_model.get(self._selected_color)
+        if not color_regions or not color_regions.regions:
+            QMessageBox.warning(self, "Export", "No regions found for selected color.")
+            return
+        
+        # Get export parameters
+        try:
+            total_width_value = float(self._edit_width.text())
+            total_height_value = float(self._edit_height.text())
+            margin_width_value = float(self._edit_margin_width.text()) if self._edit_margin_width.text() else 0.0
+            margin_height_value = float(self._edit_margin_height.text()) if self._edit_margin_height.text() else 0.0
+            units = self._combo_units.currentText()
+        except ValueError:
+            QMessageBox.warning(self, "Export", "Please enter valid numeric values for dimensions and margins.")
+            return
+        
+        # Calculate the bounding box of the regions being exported
+        from processing.svg_export import calculate_regions_bounding_box
+        regions_bbox = calculate_regions_bounding_box(color_regions.regions)
+        if regions_bbox is None:
+            QMessageBox.warning(self, "Export", "Failed to calculate regions bounding box.")
+            return
+        
+        regions_min_x, regions_min_y, regions_width, regions_height = regions_bbox
+        
+        # Get total image dimensions (non-transparent bounds)
+        total_image_width_pixels = self._export_width_pixels
+        total_image_height_pixels = self._export_height_pixels
+        
+        if total_image_width_pixels <= 0 or total_image_height_pixels <= 0:
+            QMessageBox.warning(self, "Export", "Invalid total image dimensions.")
+            return
+        
+        # Calculate scale factor based on total image size
+        # Convert total dimensions to pixels (assuming 96 DPI)
+        dpi = 96.0
+        pixels_per_inch = dpi
+        if units == "cm":
+            total_width_pixels = (total_width_value / 2.54) * pixels_per_inch
+            total_height_pixels = (total_height_value / 2.54) * pixels_per_inch
+        elif units == "mm":
+            total_width_pixels = (total_width_value / 25.4) * pixels_per_inch
+            total_height_pixels = (total_height_value / 25.4) * pixels_per_inch
+        else:  # "in"
+            total_width_pixels = total_width_value * pixels_per_inch
+            total_height_pixels = total_height_value * pixels_per_inch
+        
+        # Calculate scale factors
+        scale_x = total_width_pixels / total_image_width_pixels
+        scale_y = total_height_pixels / total_image_height_pixels
+        scale = min(scale_x, scale_y)  # Maintain aspect ratio
+        
+        # Calculate actual output dimensions for the exported regions
+        output_width = regions_width * scale
+        output_height = regions_height * scale
+        
+        # Convert back to the specified units
+        if units == "cm":
+            output_width = (output_width / pixels_per_inch) * 2.54
+            output_height = (output_height / pixels_per_inch) * 2.54
+        elif units == "mm":
+            output_width = (output_width / pixels_per_inch) * 25.4
+            output_height = (output_height / pixels_per_inch) * 25.4
+        else:  # "in"
+            output_width = output_width / pixels_per_inch
+            output_height = output_height / pixels_per_inch
+        
+        # Get file path from user
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Regions to SVG",
+            "regions.svg",
+            "SVG Files (*.svg);;All Files (*)"
+        )
+        
+        if not file_path:
+            # User cancelled
+            return
+        
+        # Export to SVG
+        from processing.svg_export import export_regions_to_svg
+        success = export_regions_to_svg(
+            color_regions.regions,
+            output_width,
+            output_height,
+            margin_width_value,
+            margin_height_value,
+            units,
+            file_path
+        )
+        
+        if success:
+            self.statusBarMessage.emit(f"Regions exported to: {file_path}")
+        else:
+            QMessageBox.warning(self, "Export", "Failed to export regions to SVG.")
+    
+    def _on_export_all(self) -> None:
+        """Handle Export All button click."""
+        if not self._region_model:
+            QMessageBox.warning(self, "Export", "No regions available to export.")
+            return
+        
+        # Get export parameters
+        try:
+            total_width_value = float(self._edit_width.text())
+            total_height_value = float(self._edit_height.text())
+            margin_width_value = float(self._edit_margin_width.text()) if self._edit_margin_width.text() else 0.0
+            margin_height_value = float(self._edit_margin_height.text()) if self._edit_margin_height.text() else 0.0
+            units = self._combo_units.currentText()
+        except ValueError:
+            QMessageBox.warning(self, "Export", "Please enter valid numeric values for dimensions and margins.")
+            return
+        
+        # Collect all regions from all colors
+        all_regions = []
+        for color_regions in self._region_model.values():
+            all_regions.extend(color_regions.regions)
+        
+        if not all_regions:
+            QMessageBox.warning(self, "Export", "No regions found to export.")
+            return
+        
+        # Calculate the bounding box of the regions being exported
+        from processing.svg_export import calculate_regions_bounding_box
+        regions_bbox = calculate_regions_bounding_box(all_regions)
+        if regions_bbox is None:
+            QMessageBox.warning(self, "Export", "Failed to calculate regions bounding box.")
+            return
+        
+        regions_min_x, regions_min_y, regions_width, regions_height = regions_bbox
+        
+        # Get total image dimensions (non-transparent bounds)
+        total_image_width_pixels = self._export_width_pixels
+        total_image_height_pixels = self._export_height_pixels
+        
+        if total_image_width_pixels <= 0 or total_image_height_pixels <= 0:
+            QMessageBox.warning(self, "Export", "Invalid total image dimensions.")
+            return
+        
+        # Calculate scale factor based on total image size
+        # Convert total dimensions to pixels (assuming 96 DPI)
+        dpi = 96.0
+        pixels_per_inch = dpi
+        if units == "cm":
+            total_width_pixels = (total_width_value / 2.54) * pixels_per_inch
+            total_height_pixels = (total_height_value / 2.54) * pixels_per_inch
+        elif units == "mm":
+            total_width_pixels = (total_width_value / 25.4) * pixels_per_inch
+            total_height_pixels = (total_height_value / 25.4) * pixels_per_inch
+        else:  # "in"
+            total_width_pixels = total_width_value * pixels_per_inch
+            total_height_pixels = total_height_value * pixels_per_inch
+        
+        # Calculate scale factors
+        scale_x = total_width_pixels / total_image_width_pixels
+        scale_y = total_height_pixels / total_image_height_pixels
+        scale = min(scale_x, scale_y)  # Maintain aspect ratio
+        
+        # Calculate actual output dimensions for the exported regions
+        output_width = regions_width * scale
+        output_height = regions_height * scale
+        
+        # Convert back to the specified units
+        if units == "cm":
+            output_width = (output_width / pixels_per_inch) * 2.54
+            output_height = (output_height / pixels_per_inch) * 2.54
+        elif units == "mm":
+            output_width = (output_width / pixels_per_inch) * 25.4
+            output_height = (output_height / pixels_per_inch) * 25.4
+        else:  # "in"
+            output_width = output_width / pixels_per_inch
+            output_height = output_height / pixels_per_inch
+        
+        # Get file path from user
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export All Regions to SVG",
+            "all_regions.svg",
+            "SVG Files (*.svg);;All Files (*)"
+        )
+        
+        if not file_path:
+            # User cancelled
+            return
+        
+        # Export to SVG
+        from processing.svg_export import export_regions_to_svg
+        success = export_regions_to_svg(
+            all_regions,
+            output_width,
+            output_height,
+            margin_width_value,
+            margin_height_value,
+            units,
+            file_path
+        )
+        
+        if success:
+            self.statusBarMessage.emit(f"All regions exported to: {file_path}")
+        else:
+            QMessageBox.warning(self, "Export", "Failed to export regions to SVG.")

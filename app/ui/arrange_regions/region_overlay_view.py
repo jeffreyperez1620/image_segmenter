@@ -355,6 +355,11 @@ class RegionOverlayView(BaseOverlayView):
             # Forward non-left button events to ImageView
             self._forward_event_to_image_view(event)
     
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        """Handle wheel events for zooming."""
+        # Forward all wheel events to the ImageView for zoom functionality
+        self._forward_wheel_event_to_image_view(event)
+    
     def paintEvent(self, event) -> None:
         """Paint the rotation handles for active regions."""
         if not self._active or not self._active_item or not self._active_item.is_active():

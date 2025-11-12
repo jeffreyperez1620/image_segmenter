@@ -286,7 +286,8 @@ def _get_component_mask(
     is_transparent: bool
 ) -> np.ndarray:
     """
-    Get component mask for a region based on transparency.
+    Get full-size component mask for a region based on transparency.
+    Used for neighbor detection and global label marking.
     
     Parameters
     ----------
@@ -302,12 +303,56 @@ def _get_component_mask(
     Returns
     -------
     np.ndarray
-        Boolean mask for the component
+        Boolean mask for the component (full image size)
     """
     if is_transparent:
         return (labels == component_id) & (alpha == 0)
     else:
         return (labels == component_id) & (alpha > 0)
+
+
+def _get_component_mask_bbox(
+    labels: np.ndarray,
+    component_id: int,
+    alpha: np.ndarray,
+    is_transparent: bool,
+    bbox: Tuple[int, int, int, int]
+) -> np.ndarray:
+    """
+    Get bounding-box-sized component mask for a region.
+    Used for caching region data to save memory.
+    
+    Parameters
+    ----------
+    labels: np.ndarray
+        Labels array from connected components
+    component_id: int
+        Component ID to extract
+    alpha: np.ndarray
+        Alpha channel of the image
+    is_transparent: bool
+        Whether the region is transparent
+    bbox: Tuple[int, int, int, int]
+        Bounding box (x, y, width, height)
+        
+    Returns
+    -------
+    np.ndarray
+        Boolean mask for the component in bounding box coordinates
+    """
+    x_min, y_min, width, height = bbox
+    x_max = x_min + width
+    y_max = y_min + height
+    
+    # Extract bounding box region from labels and alpha
+    labels_bbox = labels[y_min:y_max, x_min:x_max]
+    alpha_bbox = alpha[y_min:y_max, x_min:x_max]
+    
+    # Create mask in bbox coordinates
+    if is_transparent:
+        return (labels_bbox == component_id) & (alpha_bbox == 0)
+    else:
+        return (labels_bbox == component_id) & (alpha_bbox > 0)
 
 
 def _update_image_for_merge(
@@ -455,9 +500,10 @@ def _build_region_graph(
     rgba: np.ndarray,
     connectivity: int = 8,
     progress_callback: Optional[callable] = None
-) -> Tuple[Dict[int, dict], np.ndarray]:
+) -> Tuple[Dict[int, dict], np.ndarray, Dict[int, dict]]:
     """
     Build a graph of regions with unique IDs and their neighbors.
+    Also creates a region cache with bounding-box masks for final rendering.
     
     Parameters
     ----------
@@ -470,10 +516,11 @@ def _build_region_graph(
         
     Returns
     -------
-    Tuple[Dict[int, dict], np.ndarray]
-        Tuple of (region_registry, global_region_labels)
-        region_registry maps region_id -> {size, color, neighbor_ids, component_id, labels, centroid, bbox}
+    Tuple[Dict[int, dict], np.ndarray, Dict[int, dict]]
+        Tuple of (region_registry, global_region_labels, region_cache)
+        region_registry maps region_id -> {size, color, neighbor_ids, contained_ids, component_id, labels, centroid, bbox, is_transparent}
         global_region_labels maps each pixel to its region_id (0 = no region/transparent)
+        region_cache maps region_id -> {mask, color, bbox} for final rendering
     """
     h, w = rgba.shape[:2]
     alpha = rgba[:, :, 3]
@@ -483,6 +530,7 @@ def _build_region_graph(
     
     # Assign unique IDs to each region and build registry
     region_registry: Dict[int, dict] = {}
+    region_cache: Dict[int, dict] = {}  # Cache for final rendering: {mask, color, bbox}
     total_regions = len(all_regions)
     region_id_counter = 0
     
@@ -494,23 +542,37 @@ def _build_region_graph(
         labels = region['labels']
         component_id = region['component_id']
         is_transparent = region.get('is_transparent', False)
+        bbox = region['bbox']
         
+        # Get full mask for global label marking
         component_mask = _get_component_mask(labels, component_id, alpha, is_transparent)
         
         # Mark pixels in global labels array
         global_region_labels[component_mask] = region_id_counter
         
-        # Store region info
+        # Get bounding-box mask for caching
+        bbox_mask = _get_component_mask_bbox(labels, component_id, alpha, is_transparent, bbox)
+        
+        # Store region info in registry
         region_registry[region_id_counter] = {
             'size': region['size'],
             'color': region['color'],
             'neighbor_ids': set(),
+            'contained_ids': {region_id_counter},  # Initially contains only itself
             'component_id': component_id,
             'labels': labels,
             'centroid': region['centroid'],
-            'bbox': region['bbox'],
+            'bbox': bbox,
             'is_transparent': is_transparent
         }
+        
+        # Store region data in cache for final rendering
+        region_cache[region_id_counter] = {
+            'mask': bbox_mask,
+            'color': region['color'],
+            'bbox': bbox
+        }
+        
         region_id_counter += 1
 
     # Build neighbor graph using dilation to find adjacent pixels
@@ -565,7 +627,7 @@ def _build_region_graph(
                 # Neighbor hasn't been processed yet or was deleted (shouldn't happen during initialization)
                 print(f"WARNING: Region {neighbor_id} not found in registry when making relationship symmetric for region {region_id}")
     
-    return region_registry, global_region_labels
+    return region_registry, global_region_labels, region_cache
 
 
 def _get_valid_merge_neighbors(
@@ -629,13 +691,13 @@ def _merge_regions_in_graph(
     region_registry: Dict[int, dict],
     region_a_id: int,
     region_b_id: int,
-    rgba: np.ndarray,
     small_region_ids: set,
     min_size: int,
     image_context: dict
 ) -> None:
     """
-    Merge region A into region B in the graph and update the image.
+    Merge region A into region B in the graph.
+    Updates containment lists instead of updating the image.
     
     Parameters
     ----------
@@ -645,12 +707,12 @@ def _merge_regions_in_graph(
         ID of region to merge (will be removed)
     region_b_id: int
         ID of region to merge into (will be updated)
-    rgba: np.ndarray
-        Image to update
     small_region_ids: set
         Set of small region IDs to maintain
     min_size: int
         Minimum size threshold for small regions
+    image_context: dict
+        Image context containing color_counts and max_region_size
     """
     # Ensure IDs are Python ints (not numpy int32)
     region_a_id = int(region_a_id)
@@ -730,11 +792,8 @@ def _merge_regions_in_graph(
         print(error_msg)
         raise RuntimeError(error_msg)
     
-    # Update image: merge A's pixels into B
-    labels_a = region_a['labels']
-    component_id_a = region_a['component_id']
-    color_b = region_b['color']
-    _update_image_for_merge(rgba, labels_a, component_id_a, is_a_transparent, is_b_transparent, color_b)
+    # Update containment list: B now contains all regions that A contained
+    region_b['contained_ids'] = region_b['contained_ids'] | region_a['contained_ids']
     
     # Remove A from registry
     del region_registry[region_a_id]
@@ -824,10 +883,8 @@ def _merge_regions_in_graph(
         if region_b_id in small_region_ids and region_b['size'] >= min_size:
             small_region_ids.discard(region_b_id)
         
-        # Update image: merge C's pixels into B
-        labels_c = region_c['labels']
-        component_id_c = region_c['component_id']
-        _update_image_for_merge(rgba, labels_c, component_id_c, is_c_transparent, is_b_transparent, color_b)
+        # Update containment list: B now contains all regions that C contained
+        region_b['contained_ids'] = region_b['contained_ids'] | region_c['contained_ids']
         
         # Update color_counts for recursive merge
         _update_color_counts_for_merge(
@@ -843,6 +900,72 @@ def _merge_regions_in_graph(
         
         same_color_neighbors_to_check.discard(c_id)
 
+
+def _render_final_image(
+    rgba: np.ndarray,
+    region_registry: Dict[int, dict],
+    region_cache: Dict[int, dict]
+) -> None:
+    """
+    Render the final image based on the merged region graph.
+    Iterates through all final merged regions and renders all original regions
+    in their containment lists.
+    
+    Parameters
+    ----------
+    rgba: np.ndarray
+        Image to render into (modified in place)
+    region_registry: Dict[int, dict]
+        Final merged region registry
+    region_cache: Dict[int, dict]
+        Cache of original region data (mask, color, bbox)
+    """
+    # Verification: ensure all original regions are accounted for
+    total_contained = sum(len(region['contained_ids']) for region in region_registry.values())
+    total_original = len(region_cache)
+    
+    if total_contained != total_original:
+        error_msg = (
+            f"ERROR: Verification failed! Total contained regions ({total_contained}) "
+            f"does not equal total original regions ({total_original}). "
+            f"This indicates a bug in containment list maintenance."
+        )
+        print(error_msg)
+        raise RuntimeError(error_msg)
+    
+    # Iterate through all final merged regions
+    for merged_region_id, merged_region_data in region_registry.items():
+        final_color = merged_region_data['color']
+        contained_ids = merged_region_data['contained_ids']
+        if final_color is None and not merged_region_data.get('is_transparent', True):
+            print(f"ERROR: Final color is None for merged region {merged_region_id}, skipping")
+            raise RuntimeError(f"Final color is None for merged region {merged_region_id}")
+        
+        if contained_ids is None:
+            print(f"ERROR: Contained IDs is None for merged region {merged_region_id}, skipping")
+            raise RuntimeError(f"Contained IDs is None for merged region {merged_region_id}")
+
+        # Render all original regions in the containment list
+        for original_region_id in contained_ids:
+            if original_region_id not in region_cache:
+                print(f"ERROR: Original region {original_region_id} not found in cache, skipping")
+                continue
+            
+            original_data = region_cache[original_region_id]
+            mask = original_data['mask']
+            bbox = original_data['bbox']
+            x_min, y_min, width, height = bbox
+            
+            # Render mask pixels to final color
+            if final_color is not None:
+                # Non-transparent region
+                rgba[y_min:y_min+height, x_min:x_min+width, 0][mask] = final_color[0]
+                rgba[y_min:y_min+height, x_min:x_min+width, 1][mask] = final_color[1]
+                rgba[y_min:y_min+height, x_min:x_min+width, 2][mask] = final_color[2]
+                rgba[y_min:y_min+height, x_min:x_min+width, 3][mask] = 255
+            else:
+                # Transparent region (delete)
+                rgba[y_min:y_min+height, x_min:x_min+width, 3][mask] = 0
 
 def merge_small_regions(
     rgba: np.ndarray, 
@@ -919,7 +1042,7 @@ def merge_small_regions(
             overall_progress = 15 + int((current / total) * 5)
             progress_callback(overall_progress, 100, message)
     
-    region_registry, global_region_labels = _build_region_graph(all_regions, result, connectivity, graph_progress_callback)
+    region_registry, global_region_labels, region_cache = _build_region_graph(all_regions, result, connectivity, graph_progress_callback)
     
     # Build initial set of small regions (regions below threshold)
     # This set will be maintained incrementally - regions only get larger or are removed
@@ -978,8 +1101,11 @@ def merge_small_regions(
             
             # Skip if region size is 0 (shouldn't happen, but safety check)
             if region_size == 0:
+                # Mark as transparent and keep in registry for final rendering
+                region_data['color'] = None
+                region_data['is_transparent'] = True
                 small_region_ids.discard(region_id)
-                del region_registry[region_id]
+                # DO NOT remove from registry - keep it for final rendering
                 continue
             
             # Get neighbors from graph
@@ -993,15 +1119,16 @@ def merge_small_regions(
             
             # Check if region has no neighbors (surrounded by transparent or at edge)
             if not neighbor_ids:
-                # No neighbors - delete the region (make transparent)
-                # Only update image if not already transparent
-                if not is_transparent:
-                    _delete_region_from_image(result, labels, component_id, is_transparent)
+                # No neighbors - mark as transparent (keep in registry for final rendering)                
+                # Mark as transparent in the graph (will be rendered as transparent in final image)
+                # Keep in registry so contained_ids are preserved for final rendering
+                region_data['color'] = None
+                region_data['is_transparent'] = True
                 _update_color_counts_for_deletion(image_context, target_color, region_size, is_transparent)
                 merged_count += 1
-                # Remove from registry and small_region_ids
+                # Remove from small_region_ids (no longer needs processing)
                 small_region_ids.discard(region_id)
-                del region_registry[region_id]
+                # DO NOT remove from registry - keep it for final rendering
                 continue
             
             # Get valid neighbors for merging (filters out transparent neighbors)
@@ -1012,9 +1139,10 @@ def merge_small_regions(
             if not neighbor_by_color:
                 # No valid non-transparent neighbors to merge into
                 # Delete the region (make it transparent) and update neighbors
-                # Only update image if not already transparent
-                if not is_transparent:
-                    _delete_region_from_image(result, labels, component_id, is_transparent)
+                # Mark as transparent in the graph (will be rendered as transparent in final image)
+                # Keep in registry so contained_ids are preserved for final rendering
+                region_data['color'] = None
+                region_data['is_transparent'] = True
                 
                 # Update neighbors: remove this region from their neighbor lists
                 for neighbor_id in list(neighbor_ids):
@@ -1023,9 +1151,9 @@ def merge_small_regions(
                 
                 _update_color_counts_for_deletion(image_context, target_color, region_size, is_transparent)
                 merged_count += 1
-                # Remove from registry and small_region_ids
+                # Remove from small_region_ids (no longer needs processing)
                 small_region_ids.discard(region_id)
-                del region_registry[region_id]
+                # DO NOT remove from registry - keep it for final rendering
                 continue
             
             # Determine which neighbor to merge to
@@ -1059,17 +1187,20 @@ def merge_small_regions(
                 best_color, best_neighbor_id, best_neighbor, _ = max(neighbor_scores, key=lambda x: x[3])
             
             # Merge region into best neighbor
-            _merge_regions_in_graph(region_registry, region_id, best_neighbor_id, result, small_region_ids, min_size, image_context)
+            _merge_regions_in_graph(region_registry, region_id, best_neighbor_id, small_region_ids, min_size, image_context)
             merged_count += 1
-            
-            # Update alpha reference after merge (image may have changed)
-            alpha = result[:, :, 3]
         
         # Update totals for this pass
         total_merged += merged_count
         
         if progress_callback:
             progress_callback(20 + pass_num * 25, 100, f"Pass {pass_num} complete: {merged_count} regions merged")
+    
+    # Render final image based on merged graph
+    if progress_callback:
+        progress_callback(95, 100, "Rendering final image...")
+    
+    _render_final_image(result, region_registry, region_cache)
     
     if progress_callback:
         progress_callback(100, 100, f"Complete: {total_merged} regions merged")
@@ -1114,30 +1245,47 @@ def flood_fill_region(
     if x < 0 or y < 0 or x >= rgb.shape[1] or y >= rgb.shape[0]:
         return result
     
-    # Only flood fill non-transparent pixels
-    if alpha[y, x] == 0:
-        return result
+    # Check if seed point is transparent
+    is_transparent_seed = alpha[y, x] == 0
     
-    # Create mask for flood fill - ensure it's contiguous
-    mask = np.zeros((rgb.shape[0] + 2, rgb.shape[1] + 2), dtype=np.uint8)
-    
-    # Perform flood fill with proper array handling
-    try:
-        cv.floodFill(
-            rgb, 
-            mask, 
-            (x, y), 
-            fill_color,
-            loDiff=(0, 0, 0),
-            upDiff=(0, 0, 0),
-            flags=cv.FLOODFILL_FIXED_RANGE
-        )
-        # Copy the modified RGB data back to the result array
-        result[:, :, :3] = rgb
-    except cv.error as e:
-        # If OpenCV floodFill fails, try a manual flood fill implementation
-        print(f"OpenCV floodFill failed: {e}, using manual implementation")
-        result = _manual_flood_fill(result, seed_point, fill_color)
+    if is_transparent_seed:
+        # For transparent pixels, flood fill all connected transparent pixels
+        # Create a mask for transparent pixels
+        transparent_mask = (alpha == 0).astype(np.uint8)
+        
+        # Use connected components to find the transparent region
+        num_labels, labels, stats, centroids = cv.connectedComponentsWithStats(transparent_mask, connectivity=8)
+        
+        # Find which component the seed point belongs to
+        seed_label = labels[y, x]
+        
+        if seed_label > 0:  # Found a transparent region
+            # Fill all pixels in this transparent region
+            region_mask = (labels == seed_label)
+            result[region_mask, :3] = fill_color
+            result[region_mask, 3] = 255  # Make fully opaque
+    else:
+        # For non-transparent pixels, use normal flood fill
+        # Create mask for flood fill - ensure it's contiguous
+        mask = np.zeros((rgb.shape[0] + 2, rgb.shape[1] + 2), dtype=np.uint8)
+        
+        # Perform flood fill with proper array handling
+        try:
+            cv.floodFill(
+                rgb, 
+                mask, 
+                (x, y), 
+                fill_color,
+                loDiff=(0, 0, 0),
+                upDiff=(0, 0, 0),
+                flags=cv.FLOODFILL_FIXED_RANGE
+            )
+            # Copy the modified RGB data back to the result array
+            result[:, :, :3] = rgb
+        except cv.error as e:
+            # If OpenCV floodFill fails, try a manual flood fill implementation
+            print(f"OpenCV floodFill failed: {e}, using manual implementation")
+            result = _manual_flood_fill(result, seed_point, fill_color)
     
     return result
 
@@ -1160,35 +1308,62 @@ def _manual_flood_fill(
     if x < 0 or y < 0 or x >= rgb.shape[1] or y >= rgb.shape[0]:
         return result
     
-    # Only flood fill non-transparent pixels
-    if alpha[y, x] == 0:
-        return result
+    # Check if seed point is transparent
+    is_transparent_seed = alpha[y, x] == 0
     
-    # Get the original color at the seed point
-    original_color = tuple(rgb[y, x])
-    
-    # Simple flood fill using a stack
-    stack = [(x, y)]
-    visited = set()
-    
-    while stack:
-        cx, cy = stack.pop()
+    if is_transparent_seed:
+        # For transparent pixels, flood fill all connected transparent pixels
+        # Simple flood fill using a stack
+        stack = [(x, y)]
+        visited = set()
         
-        if (cx, cy) in visited:
-            continue
+        while stack:
+            cx, cy = stack.pop()
             
-        if (cx < 0 or cx >= rgb.shape[1] or 
-            cy < 0 or cy >= rgb.shape[0] or 
-            alpha[cy, cx] == 0):
-            continue
+            if (cx, cy) in visited:
+                continue
+                
+            if (cx < 0 or cx >= rgb.shape[1] or 
+                cy < 0 or cy >= rgb.shape[0]):
+                continue
+                
+            # Only fill transparent pixels
+            if alpha[cy, cx] != 0:
+                continue
+                
+            visited.add((cx, cy))
+            rgb[cy, cx] = fill_color
+            alpha[cy, cx] = 255  # Make fully opaque
             
-        if tuple(rgb[cy, cx]) != original_color:
-            continue
-            
-        visited.add((cx, cy))
-        rgb[cy, cx] = fill_color
+            # Add neighbors to stack
+            stack.extend([(cx+1, cy), (cx-1, cy), (cx, cy+1), (cx, cy-1)])
+    else:
+        # For non-transparent pixels, use normal flood fill
+        # Get the original color at the seed point
+        original_color = tuple(rgb[y, x])
         
-        # Add neighbors to stack
-        stack.extend([(cx+1, cy), (cx-1, cy), (cx, cy+1), (cx, cy-1)])
+        # Simple flood fill using a stack
+        stack = [(x, y)]
+        visited = set()
+        
+        while stack:
+            cx, cy = stack.pop()
+            
+            if (cx, cy) in visited:
+                continue
+                
+            if (cx < 0 or cx >= rgb.shape[1] or 
+                cy < 0 or cy >= rgb.shape[0] or 
+                alpha[cy, cx] == 0):
+                continue
+                
+            if tuple(rgb[cy, cx]) != original_color:
+                continue
+                
+            visited.add((cx, cy))
+            rgb[cy, cx] = fill_color
+            
+            # Add neighbors to stack
+            stack.extend([(cx+1, cy), (cx-1, cy), (cx, cy+1), (cx, cy-1)])
     
     return result
